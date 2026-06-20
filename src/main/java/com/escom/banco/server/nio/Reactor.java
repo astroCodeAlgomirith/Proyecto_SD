@@ -67,6 +67,11 @@ final class Reactor implements Runnable {
         selector.wakeup();
     }
 
+    /** Cierra el selector sin haber arrancado el hilo (rollback de iniciar()). */
+    void cerrarSelector() {
+        try { selector.close(); } catch (IOException ignore) {}
+    }
+
     @Override
     public void run() {
         try {
@@ -84,7 +89,7 @@ final class Reactor implements Runnable {
                     it.remove();
                     if (!key.isValid()) continue;
                     try {
-                        if (key.isAcceptable()) aceptar();
+                        if (key.isAcceptable()) { if (activo) aceptar(); }
                         else if (key.isReadable()) leer(key);
                         else if (key.isWritable()) flush(key);
                     } catch (CancelledKeyException e) {
@@ -95,6 +100,14 @@ final class Reactor implements Runnable {
         } catch (IOException e) {
             if (activo) System.err.println("Reactor: " + e);
         } finally {
+            // cierre limpio: canales vivos + canales aceptados aun sin registrar
+            for (SelectionKey k : selector.keys()) {
+                try { k.channel().close(); } catch (IOException ignore) {}
+            }
+            SocketChannel ch;
+            while ((ch = nuevos.poll()) != null) {
+                try { ch.close(); } catch (IOException ignore) {}
+            }
             try { selector.close(); } catch (IOException ignore) {}
         }
     }

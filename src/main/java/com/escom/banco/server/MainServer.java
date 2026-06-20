@@ -50,6 +50,11 @@ public class MainServer {
         if (!peers.isEmpty()) System.out.println("  Peers del panel: " + peers);
 
         iniciarReplicacion();
+
+        // Los hilos del servidor NIO son daemon (para que los tests terminen sin
+        // shutdown manual); por eso el hilo main debe bloquearse o el JVM saldria
+        // en cuanto main() retorna, dejando los sockets sin atender.
+        new java.util.concurrent.CountDownLatch(1).await();
     }
 
     /**

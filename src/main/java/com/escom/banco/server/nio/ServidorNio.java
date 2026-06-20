@@ -47,28 +47,33 @@ public final class ServidorNio {
         reactores = new Reactor[numReactores];
         for (int i = 0; i < numReactores; i++) reactores[i] = new Reactor(ruteador, pool);
 
-        boolean reuseport = numReactores > 1 && soportaReuseport();
-        if (numReactores == 1) {
-            ServerSocketChannel s = abrir(puerto, false);
-            puerto = puertoLocal(s);
-            sscs = new ServerSocketChannel[]{s};
-            reactores[0].conAcceptor(s, null);
-        } else if (reuseport) {
-            sscs = new ServerSocketChannel[numReactores];
-            ServerSocketChannel s0 = abrir(puerto, true);
-            puerto = puertoLocal(s0);
-            sscs[0] = s0;
-            reactores[0].conAcceptor(s0, null);
-            for (int i = 1; i < numReactores; i++) {
-                ServerSocketChannel si = abrir(puerto, true);
-                sscs[i] = si;
-                reactores[i].conAcceptor(si, null);
+        try {
+            boolean reuseport = numReactores > 1 && soportaReuseport();
+            if (numReactores == 1) {
+                ServerSocketChannel s = abrir(puerto, false);
+                puerto = puertoLocal(s);
+                sscs = new ServerSocketChannel[]{s};
+                reactores[0].conAcceptor(s, null);
+            } else if (reuseport) {
+                sscs = new ServerSocketChannel[numReactores];
+                ServerSocketChannel s0 = abrir(puerto, true);
+                puerto = puertoLocal(s0);
+                sscs[0] = s0;
+                reactores[0].conAcceptor(s0, null);
+                for (int i = 1; i < numReactores; i++) {
+                    ServerSocketChannel si = abrir(puerto, true);
+                    sscs[i] = si;
+                    reactores[i].conAcceptor(si, null);
+                }
+            } else {
+                ServerSocketChannel s = abrir(puerto, false);
+                puerto = puertoLocal(s);
+                sscs = new ServerSocketChannel[]{s};
+                reactores[0].conAcceptor(s, reactores); // acceptor unico reparte round-robin
             }
-        } else {
-            ServerSocketChannel s = abrir(puerto, false);
-            puerto = puertoLocal(s);
-            sscs = new ServerSocketChannel[]{s};
-            reactores[0].conAcceptor(s, reactores); // acceptor unico reparte round-robin
+        } catch (IOException e) {
+            limpiarParcial(); // cerrar selectores y sockets ya abiertos antes de propagar
+            throw e;
         }
 
         hilos = new Thread[numReactores];
@@ -85,26 +90,45 @@ public final class ServidorNio {
 
     public synchronized void detener() {
         if (!iniciado) return;
-        for (Reactor r : reactores) r.detener();
+        try {
+            for (Reactor r : reactores) r.detener();
+            if (sscs != null) {
+                for (ServerSocketChannel s : sscs) {
+                    try { if (s != null) s.close(); } catch (IOException ignore) {}
+                }
+            }
+            for (Thread h : hilos) {
+                try { h.join(2000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            }
+        } finally {
+            if (pool != null) pool.shutdownNow();
+            iniciado = false;
+        }
+    }
+
+    /** Cierra selectores y sockets ya abiertos cuando iniciar() falla a mitad. */
+    private void limpiarParcial() {
+        if (reactores != null) for (Reactor r : reactores) r.cerrarSelector();
         if (sscs != null) {
             for (ServerSocketChannel s : sscs) {
                 try { if (s != null) s.close(); } catch (IOException ignore) {}
             }
         }
-        for (Thread h : hilos) {
-            try { h.join(2000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-        }
-        pool.shutdownNow();
-        iniciado = false;
+        if (pool != null) pool.shutdownNow();
     }
 
     private static ServerSocketChannel abrir(int puerto, boolean reuseport) throws IOException {
         ServerSocketChannel s = ServerSocketChannel.open();
-        s.configureBlocking(false);
-        s.setOption(StandardSocketOptions.SO_REUSEADDR, true);
-        if (reuseport) s.setOption(StandardSocketOptions.SO_REUSEPORT, true);
-        s.bind(new InetSocketAddress(puerto), BACKLOG);
-        return s;
+        try {
+            s.configureBlocking(false);
+            s.setOption(StandardSocketOptions.SO_REUSEADDR, true);
+            if (reuseport) s.setOption(StandardSocketOptions.SO_REUSEPORT, true);
+            s.bind(new InetSocketAddress(puerto), BACKLOG);
+            return s;
+        } catch (IOException e) {
+            try { s.close(); } catch (IOException ignore) {}
+            throw e;
+        }
     }
 
     private static int puertoLocal(ServerSocketChannel s) throws IOException {

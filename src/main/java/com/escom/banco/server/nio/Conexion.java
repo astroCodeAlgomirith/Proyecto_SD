@@ -25,8 +25,8 @@ final class Conexion {
 
     final Queue<ByteBuffer> salida = new ConcurrentLinkedQueue<>();
     volatile boolean cerrarTrasFlush = false;
-    boolean continueEnviado = false;   // 100-continue ya emitido para la request actual
-    boolean esperandoWorker = false;   // hay una request despachada al pool sin responder
+    boolean continueEnviado = false;   // 100-continue ya emitido para la request actual (solo hilo reactor)
+    volatile boolean esperandoWorker = false; // request despachada al pool: la escribe el worker, la lee el reactor
 
     Conexion(SocketChannel canal) { this.canal = canal; }
 
