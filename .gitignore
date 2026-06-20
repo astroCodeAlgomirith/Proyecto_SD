@@ -1,0 +1,5 @@
+target/
+*.class
+dependency-reduced-pom.xml
+# CSV generado (26 MB, reproducible con herramientas/GeneradorRegistros.java)
+alumnos.csv
