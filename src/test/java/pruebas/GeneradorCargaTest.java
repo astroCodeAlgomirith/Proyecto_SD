@@ -4,7 +4,7 @@ import com.escom.banco.carga.GeneradorCarga;
 import com.escom.banco.data.CuentaRepository;
 import com.escom.banco.model.Cuenta;
 import com.escom.banco.server.BancoHttp;
-import com.sun.net.httpserver.HttpServer;
+import com.escom.banco.server.nio.ServidorNio;
 
 /**
  * Corre el generador de carga ~2s contra un nodo HTTP real en proceso (puerto
@@ -22,16 +22,14 @@ public final class GeneradorCargaTest {
         for (int i = 1; i <= n; i++) repo.put(new Cuenta(i, "n" + i, "a", "b", saldo));
         long totalAntes = repo.saldoTotalCentavos();
 
-        HttpServer server = BancoHttp.crear(0);
-        server.start();
-        int puerto = server.getAddress().getPort();
+        ServidorNio server = BancoHttp.crear(0);
+        server.iniciar();
+        int puerto = server.puerto();
 
         GeneradorCarga.Config cfg = new GeneradorCarga.Config("127.0.0.1", puerto, 2, 16, 500);
         GeneradorCarga.Resultado r = new GeneradorCarga(cfg).ejecutar();
 
-        server.stop(0);
-        // El pool fijo del servidor no es daemon: sin esto el JVM no termina.
-        ((java.util.concurrent.ExecutorService) server.getExecutor()).shutdownNow();
+        server.detener();
 
         MiniTest.check(r.lecturas > 0, "el generador realizo lecturas via HTTP");
         MiniTest.check(r.transOk > 0, "el generador realizo transferencias exitosas via HTTP");

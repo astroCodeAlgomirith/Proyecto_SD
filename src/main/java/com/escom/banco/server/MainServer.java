@@ -4,7 +4,7 @@ import com.escom.banco.data.AlumnosLoader;
 import com.escom.banco.data.CuentaRepository;
 import com.escom.banco.replicacion.ClienteReplicacion;
 import com.escom.banco.replicacion.ServidorReplicacion;
-import com.sun.net.httpserver.HttpServer;
+import com.escom.banco.server.nio.ServidorNio;
 
 import java.nio.file.Path;
 
@@ -37,8 +37,8 @@ public class MainServer {
         boolean esLider = esLider();
         if (esLider) iniciarAlmacenGcs();
 
-        HttpServer server = BancoHttp.crear(puerto, idLocal, peers);
-        server.start();
+        ServidorNio server = BancoHttp.crear(puerto, idLocal, peers);
+        server.iniciar();
 
         System.out.println("Nodo del banco escuchando en http://0.0.0.0:" + puerto);
         System.out.println("  POST /api/register");

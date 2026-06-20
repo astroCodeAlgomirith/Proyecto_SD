@@ -4,18 +4,16 @@ import com.escom.banco.json.Json;
 import com.escom.banco.server.BancoHttp;
 import com.escom.banco.server.PaginaHandler;
 import com.escom.banco.server.PanelHandler;
+import com.escom.banco.server.http.Ruteador;
+import com.escom.banco.server.nio.ServidorNio;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
-import com.sun.net.httpserver.HttpServer;
 
-import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse.BodyHandlers;
 import java.util.List;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 
 /**
  * Verifica que /panel agrega el stats local + el de un peer vivo + marca como
@@ -27,21 +25,21 @@ public final class PanelTest {
 
     public static void run() throws Exception {
         // Peer vivo: un nodo banco real con /stats.
-        HttpServer peer = BancoHttp.crear(0);
-        peer.start();
-        int puertoPeer = peer.getAddress().getPort();
+        ServidorNio peer = BancoHttp.crear(0);
+        peer.iniciar();
+        int puertoPeer = peer.puerto();
 
-        // Nodo con el panel, apuntando al peer vivo y a un puerto cerrado.
-        HttpServer a = HttpServer.create(new InetSocketAddress(0), 0);
-        ExecutorService exA = Executors.newFixedThreadPool(2);
-        a.setExecutor(exA);
-        a.createContext("/panel", new PanelHandler(
-                "A", List.of("127.0.0.1:" + puertoPeer, "127.0.0.1:1")));
-        a.start();
+        // Nodo con SOLO el panel (marcado WORKER: hace HttpClient.send bloqueante),
+        // apuntando al peer vivo y a un puerto cerrado.
+        Ruteador r = new Ruteador().registrar("/panel",
+                new PanelHandler("A", List.of("127.0.0.1:" + puertoPeer, "127.0.0.1:1")),
+                Ruteador.WORKER);
+        ServidorNio a = new ServidorNio(0, r, 1, 2);
+        a.iniciar();
 
         HttpClient cli = HttpClient.newHttpClient();
         HttpRequest req = HttpRequest.newBuilder(
-                URI.create("http://127.0.0.1:" + a.getAddress().getPort() + "/panel")).GET().build();
+                URI.create("http://127.0.0.1:" + a.puerto() + "/panel")).GET().build();
         JsonObject resp = Json.parse(cli.send(req, BodyHandlers.ofString()).body());
         JsonArray nodos = resp.getAsJsonArray("nodos");
 
@@ -65,9 +63,7 @@ public final class PanelTest {
         MiniTest.check(html != null && html.contains("setInterval"),
                 "el panel es reactivo (setInterval)");
 
-        peer.stop(0);
-        ((ExecutorService) peer.getExecutor()).shutdownNow();
-        a.stop(0);
-        exA.shutdownNow();
+        peer.detener();
+        a.detener();
     }
 }

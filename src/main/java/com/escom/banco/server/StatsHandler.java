@@ -2,30 +2,25 @@ package com.escom.banco.server;
 
 import com.escom.banco.data.CuentaRepository;
 import com.escom.banco.json.Json;
-import com.sun.net.httpserver.HttpExchange;
-import com.sun.net.httpserver.HttpHandler;
+import com.escom.banco.server.http.Manejador;
+import com.escom.banco.server.http.Respuesta;
+import com.escom.banco.server.http.Solicitud;
 
-import java.io.IOException;
 import java.math.BigDecimal;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * GET /stats -> snapshot O(1) del nodo para el generador de carga y el panel.
- * Publico (sin JWT) porque es solo monitoreo de un solo nodo.
- * El saldo total se da en centavos (long exacto) para verificar el invariante
- * en UNA sola peticion en vez de recorrer las 820k cuentas por HTTP.
+ * GET /stats -> snapshot del nodo para el generador de carga y el panel.
+ * Publico (sin JWT) porque es solo monitoreo de un solo nodo. El saldo total se
+ * da en centavos (long exacto) para verificar el invariante en UNA peticion.
  */
-public class StatsHandler implements HttpHandler {
+public class StatsHandler implements Manejador {
 
     @Override
-    public void handle(HttpExchange ex) throws IOException {
-        if (!"GET".equalsIgnoreCase(ex.getRequestMethod())) {
-            ex.sendResponseHeaders(405, -1);
-            ex.close();
-            return;
-        }
-        HttpUtil.enviarJson(ex, 200, Json.toJson(snapshot()));
+    public Respuesta manejar(Solicitud s) {
+        if (!"GET".equalsIgnoreCase(s.metodo())) return Respuesta.sinCuerpo(405);
+        return Respuesta.json(200, Json.toJson(snapshot()));
     }
 
     /** Estado del nodo como mapa ordenado (lo reusa PanelHandler para el agregado). */

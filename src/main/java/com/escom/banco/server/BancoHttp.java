@@ -1,26 +1,29 @@
 package com.escom.banco.server;
 
-import com.sun.net.httpserver.HttpServer;
+import com.escom.banco.server.http.Ruteador;
+import com.escom.banco.server.nio.ServidorNio;
 
-import java.io.IOException;
-import java.net.InetSocketAddress;
 import java.util.List;
-import java.util.concurrent.Executors;
 
-/** Construye el HttpServer del nodo con sus contextos (lo comparten MainServer y las pruebas). */
+/**
+ * Arma el servidor NIO del nodo con sus rutas (lo comparten MainServer y los
+ * tests). Las 4 rutas del banco se sirven INLINE en el reactor salvo login/
+ * register (bcrypt) y /panel (fetch a peers), que van al pool WORKER.
+ */
 public final class BancoHttp {
 
     private BancoHttp() {}
 
-    /** Tamano del pool de atencion HTTP; configurable por BANCO_HTTP_THREADS. */
-    private static int hilosHttp() {
-        int defecto = Math.max(32, Runtime.getRuntime().availableProcessors() * 8);
-        return enteroEnv("BANCO_HTTP_THREADS", defecto);
+    /** Numero de reactores (hilos de I/O). En e2-standard-4 (4 vCPU) => 3. */
+    private static int reactores() {
+        int cores = Runtime.getRuntime().availableProcessors();
+        int defecto = Math.max(2, Math.min(4, cores - 1));
+        return enteroEnv("BANCO_REACTORES", defecto);
     }
 
-    /** Cola de conexiones pendientes del socket; configurable por BANCO_HTTP_BACKLOG. */
-    private static int backlog() {
-        return enteroEnv("BANCO_HTTP_BACKLOG", 1024);
+    /** Hilos del pool worker (login/register/panel; bloqueantes, no CPU). */
+    private static int hilosWorker() {
+        return enteroEnv("BANCO_WORKERS", 16);
     }
 
     private static int enteroEnv(String clave, int defecto) {
@@ -30,23 +33,22 @@ public final class BancoHttp {
         catch (NumberFormatException e) { return defecto; }
     }
 
-    /** Servidor solo con los endpoints del banco (sin panel); util en pruebas. */
-    public static HttpServer crear(int puerto) throws IOException {
+    /** Servidor solo con los endpoints del banco (sin peers); util en pruebas. */
+    public static ServidorNio crear(int puerto) {
         return crear(puerto, "este-nodo", List.of());
     }
 
     /** Crea (sin arrancar) el servidor con los 4 endpoints del PDF + /stats + panel. */
-    public static HttpServer crear(int puerto, String idLocal, List<String> peers) throws IOException {
-        HttpServer server = HttpServer.create(new InetSocketAddress(puerto), backlog());
-        AuthHandler authHandler = new AuthHandler();
-        server.createContext("/api/register", authHandler);
-        server.createContext("/api/login", authHandler);
-        server.createContext("/api/accounts", new AccountHandler());
-        server.createContext("/api/transactions/transfer", new TransferHandler());
-        server.createContext("/stats", new StatsHandler());
-        server.createContext("/panel", new PanelHandler(idLocal, peers));
-        server.createContext("/", new PaginaHandler());
-        server.setExecutor(Executors.newFixedThreadPool(hilosHttp()));
-        return server;
+    public static ServidorNio crear(int puerto, String idLocal, List<String> peers) {
+        AuthHandler auth = new AuthHandler();
+        Ruteador r = new Ruteador()
+                .registrar("/api/register", auth, Ruteador.WORKER)
+                .registrar("/api/login", auth, Ruteador.WORKER)
+                .registrar("/api/accounts", new AccountHandler(), Ruteador.INLINE)
+                .registrar("/api/transactions/transfer", new TransferHandler(), Ruteador.INLINE)
+                .registrar("/stats", new StatsHandler(), Ruteador.INLINE)
+                .registrar("/panel", new PanelHandler(idLocal, peers), Ruteador.WORKER)
+                .registrar("/", new PaginaHandler(), Ruteador.INLINE);
+        return new ServidorNio(puerto, r, reactores(), hilosWorker());
     }
 }

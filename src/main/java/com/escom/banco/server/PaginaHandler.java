@@ -1,32 +1,31 @@
 package com.escom.banco.server;
 
-import com.sun.net.httpserver.HttpExchange;
-import com.sun.net.httpserver.HttpHandler;
+import com.escom.banco.server.http.Manejador;
+import com.escom.banco.server.http.Respuesta;
+import com.escom.banco.server.http.Solicitud;
 
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
-import java.io.OutputStream;
 
-/** GET / -> sirve dashboard.html (empaquetado como recurso del jar). */
-public class PaginaHandler implements HttpHandler {
+/** GET / -> sirve dashboard.html (empaquetado como recurso del jar, cacheado en bytes). */
+public class PaginaHandler implements Manejador {
+
+    private static final byte[] HTML = cargar();
 
     @Override
-    public void handle(HttpExchange ex) throws IOException {
-        if (!"/".equals(ex.getRequestURI().getPath())) {
-            ex.sendResponseHeaders(404, -1);
-            ex.close();
-            return;
-        }
-        byte[] html;
-        try (InputStream is = getClass().getResourceAsStream("/dashboard.html")) {
-            if (is == null) { ex.sendResponseHeaders(500, -1); ex.close(); return; }
-            html = is.readAllBytes();
-        }
-        ex.getResponseHeaders().set("Content-Type", "text/html; charset=UTF-8");
-        ex.sendResponseHeaders(200, html.length);
-        try (OutputStream os = ex.getResponseBody()) {
-            os.write(html);
+    public Respuesta manejar(Solicitud s) {
+        if (!"GET".equalsIgnoreCase(s.metodo())) return Respuesta.sinCuerpo(405);
+        if (!"/".equals(s.path())) return Respuesta.sinCuerpo(404);
+        if (HTML == null) return Respuesta.sinCuerpo(500);
+        return Respuesta.html(200, HTML);
+    }
+
+    private static byte[] cargar() {
+        try (InputStream is = PaginaHandler.class.getResourceAsStream("/dashboard.html")) {
+            return (is == null) ? null : is.readAllBytes();
+        } catch (IOException e) {
+            return null;
         }
     }
 
