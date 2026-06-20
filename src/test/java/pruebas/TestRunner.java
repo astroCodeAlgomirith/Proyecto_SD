@@ -12,6 +12,8 @@ public final class TestRunner {
         AlumnosLoaderTest.run();
         System.out.println("== ReplicacionTest ==");
         ReplicacionTest.run();
+        System.out.println("== ReplicacionTcpTest ==");
+        ReplicacionTcpTest.run();
         System.out.printf("%nResultado: %d pasadas, %d fallidas%n",
                 MiniTest.pasadas(), MiniTest.fallidas());
         if (MiniTest.fallidas() > 0) System.exit(1);
