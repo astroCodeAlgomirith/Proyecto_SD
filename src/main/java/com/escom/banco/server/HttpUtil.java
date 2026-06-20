@@ -9,9 +9,15 @@ import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /** Utilidades compartidas por los handlers: leer body, responder JSON, JWT. */
 public final class HttpUtil {
+
+    // Cache de tokens ya verificados (token -> subject). La validacion HMAC es
+    // cara y se repite en cada peticion con el mismo token; aqui se hace una vez.
+    private static final ConcurrentHashMap<String, String> TOKENS_VALIDOS = new ConcurrentHashMap<>();
+    private static final int TOPE_CACHE = 100_000;
 
     private HttpUtil() {}
 
@@ -43,8 +49,13 @@ public final class HttpUtil {
     public static String usuarioAutenticado(HttpExchange ex) {
         String auth = ex.getRequestHeaders().getFirst("Authorization");
         if (auth == null || !auth.startsWith("Bearer ")) return null;
+        String token = auth.substring(7);
+        String cacheado = TOKENS_VALIDOS.get(token);
+        if (cacheado != null) return cacheado;
         try {
-            return JWTUtil.verify(auth.substring(7)).getSubject();
+            String sub = JWTUtil.verify(token).getSubject();
+            if (TOKENS_VALIDOS.size() < TOPE_CACHE) TOKENS_VALIDOS.put(token, sub);
+            return sub;
         } catch (Exception e) {
             return null;
         }
