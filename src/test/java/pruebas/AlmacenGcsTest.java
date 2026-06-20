@@ -20,6 +20,7 @@ public final class AlmacenGcsTest {
         reintentaTrasFallos();
         siembraConteoExistente();
         seEnganchaAlCommit();
+        recuperaReaplicandoElLog();
     }
 
     /** Un subidor que recuerda lo subido y puede fallar las primeras N veces. */
@@ -37,6 +38,8 @@ public final class AlmacenGcsTest {
             return true;
         }
         @Override public long contarExistentes() { return existentes; }
+        List<Transaccion> log = List.of();
+        @Override public List<Transaccion> leerTodas() { return log; }
     }
 
     private static void persisteEnOrden() throws Exception {
@@ -81,6 +84,26 @@ public final class AlmacenGcsTest {
         boolean ok = esperar(() -> almacen.escritos() == 1, 2000);
         MiniTest.check(ok, "una transferencia confirmada se manda al log durable");
         almacen.detener();
+    }
+
+    private static void recuperaReaplicandoElLog() {
+        // Estado inicial (como el CSV en un arranque en frio).
+        CuentaRepository repo = new CuentaRepository();
+        repo.put(new Cuenta(1, "a", "b", "c", 100000));
+        repo.put(new Cuenta(2, "d", "e", "f", 100000));
+
+        // El log durable trae dos transferencias confirmadas (desordenadas).
+        SubidorFalso s = new SubidorFalso(0, 0);
+        s.log = List.of(new Transaccion(2, 2, 1, 1000), new Transaccion(1, 1, 2, 5000));
+        AlmacenGcs almacen = new AlmacenGcs(s);
+
+        long n = almacen.recuperar(repo::aplicarReplica);
+
+        MiniTest.eq(2L, n, "recupera las dos tx del log");
+        MiniTest.eq(96000L, repo.get(1).getSaldoCentavos(), "cuenta 1 = 100000 -5000 +1000");
+        MiniTest.eq(104000L, repo.get(2).getSaldoCentavos(), "cuenta 2 = 100000 +5000 -1000");
+        MiniTest.eq(200000L, repo.saldoTotalCentavos(), "el total se conserva tras recuperar");
+        MiniTest.eq(2L, repo.secuenciaActual(), "la secuencia queda en el maximo seq del log");
     }
 
     private static boolean esperar(BooleanSupplier cond, long msMax) throws InterruptedException {
