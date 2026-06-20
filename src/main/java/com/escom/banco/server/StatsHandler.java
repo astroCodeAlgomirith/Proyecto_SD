@@ -6,6 +6,7 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 
 import java.io.IOException;
+import java.math.BigDecimal;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -17,14 +18,6 @@ import java.util.Map;
  */
 public class StatsHandler implements HttpHandler {
 
-    private final CuentaRepository repo = CuentaRepository.get();
-    private final String rol;
-
-    public StatsHandler() {
-        String lider = System.getenv("BANCO_LIDER_HOST");
-        this.rol = (lider == null || lider.isBlank()) ? "LIDER" : "REPLICA";
-    }
-
     @Override
     public void handle(HttpExchange ex) throws IOException {
         if (!"GET".equalsIgnoreCase(ex.getRequestMethod())) {
@@ -32,15 +25,28 @@ public class StatsHandler implements HttpHandler {
             ex.close();
             return;
         }
+        HttpUtil.enviarJson(ex, 200, Json.toJson(snapshot()));
+    }
+
+    /** Estado del nodo como mapa ordenado (lo reusa PanelHandler para el agregado). */
+    public static Map<String, Object> snapshot() {
+        CuentaRepository repo = CuentaRepository.get();
+        String lider = System.getenv("BANCO_LIDER_HOST");
+        String rol = (lider == null || lider.isBlank()) ? "LIDER" : "REPLICA";
+
         long totalCent = repo.saldoTotalCentavos();
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("rol", rol);
         out.put("cuentas", repo.tamano());
         out.put("saldoTotalCentavos", totalCent);
-        out.put("saldoTotal", java.math.BigDecimal.valueOf(totalCent, 2));
+        out.put("saldoTotal", BigDecimal.valueOf(totalCent, 2));
         out.put("transferencias", repo.totalTransferencias());
         out.put("ultimaTxId", repo.ultimaTxId());
         out.put("secuencia", repo.secuenciaActual());
-        HttpUtil.enviarJson(ex, 200, Json.toJson(out));
+        out.put("cpu", SistemaMetricas.cpuPorcentaje());
+        out.put("ram", SistemaMetricas.ramPorcentaje());
+        out.put("disco", SistemaMetricas.discoPorcentaje());
+        out.put("txEnStorage", -1); // pendiente: log durable en Cloud Storage
+        return out;
     }
 }
