@@ -2,6 +2,8 @@ package com.escom.banco.server;
 
 import com.escom.banco.data.AlumnosLoader;
 import com.escom.banco.data.CuentaRepository;
+import com.escom.banco.replicacion.ClienteReplicacion;
+import com.escom.banco.replicacion.ServidorReplicacion;
 import com.sun.net.httpserver.HttpServer;
 
 import java.net.InetSocketAddress;
@@ -44,5 +46,24 @@ public class MainServer {
         System.out.println("  POST /api/login");
         System.out.println("  GET  /api/accounts/{id}            (JWT)");
         System.out.println("  POST /api/transactions/transfer    (JWT)");
+
+        iniciarReplicacion();
+    }
+
+    /**
+     * Rol por variables de entorno: sin BANCO_LIDER_HOST -> LIDER (sirve el log);
+     * con BANCO_LIDER_HOST -> REPLICA (sigue al lider y aplica en vivo).
+     */
+    private static void iniciarReplicacion() throws Exception {
+        int puertoRepl = Integer.parseInt(
+                System.getenv().getOrDefault("BANCO_REPLICACION_PUERTO", "9090"));
+        String liderHost = System.getenv("BANCO_LIDER_HOST");
+        if (liderHost == null || liderHost.isBlank()) {
+            new ServidorReplicacion(CuentaRepository.get(), puertoRepl).iniciar();
+            System.out.println("Rol: LIDER - replicacion TCP en puerto " + puertoRepl);
+        } else {
+            new ClienteReplicacion(CuentaRepository.get(), liderHost, puertoRepl).iniciar();
+            System.out.println("Rol: REPLICA - siguiendo a " + liderHost + ":" + puertoRepl);
+        }
     }
 }
