@@ -94,6 +94,8 @@ final class Reactor implements Runnable {
                         else if (key.isWritable()) flush(key);
                     } catch (CancelledKeyException e) {
                         // la key se cancelo concurrentemente; seguir
+                    } catch (Exception e) {
+                        cerrar(key); // una request mal formada no debe tumbar el reactor
                     }
                 }
             }
