@@ -46,7 +46,7 @@ public class StatsHandler implements HttpHandler {
         out.put("cpu", SistemaMetricas.cpuPorcentaje());
         out.put("ram", SistemaMetricas.ramPorcentaje());
         out.put("disco", SistemaMetricas.discoPorcentaje());
-        out.put("txEnStorage", -1); // pendiente: log durable en Cloud Storage
+        out.put("txEnStorage", repo.txEnStorage()); // -1 si el log GCS esta deshabilitado
         return out;
     }
 }
