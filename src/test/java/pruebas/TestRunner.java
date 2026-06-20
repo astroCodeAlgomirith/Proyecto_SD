@@ -20,6 +20,8 @@ public final class TestRunner {
         PanelTest.run();
         System.out.println("== AlmacenGcsTest ==");
         AlmacenGcsTest.run();
+        System.out.println("== ParserHttpTest ==");
+        ParserHttpTest.run();
         System.out.printf("%nResultado: %d pasadas, %d fallidas%n",
                 MiniTest.pasadas(), MiniTest.fallidas());
         if (MiniTest.fallidas() > 0) System.exit(1);

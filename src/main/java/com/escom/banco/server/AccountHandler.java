@@ -2,45 +2,37 @@ package com.escom.banco.server;
 
 import com.escom.banco.data.CuentaRepository;
 import com.escom.banco.model.Cuenta;
-import com.sun.net.httpserver.HttpExchange;
-import com.sun.net.httpserver.HttpHandler;
-
-import java.io.IOException;
+import com.escom.banco.server.http.Manejador;
+import com.escom.banco.server.http.Respuesta;
+import com.escom.banco.server.http.Solicitud;
 
 /**
  * GET /api/accounts/{id} -> {"id": 125, "propietario": "...", "balance": 15750.25}
- * Requiere JWT. Ojo con el JSON: id NUMERICO y campos propietario/balance.
+ * Requiere JWT. Ruta caliente (80% de la carga): se sirve INLINE en el reactor,
+ * con el JSON armado a mano (sin gson) para minimizar CPU por peticion.
  */
-public class AccountHandler implements HttpHandler {
+public class AccountHandler implements Manejador {
 
     private final CuentaRepository repo = CuentaRepository.get();
 
     @Override
-    public void handle(HttpExchange ex) throws IOException {
-        if (!"GET".equalsIgnoreCase(ex.getRequestMethod())) {
-            ex.sendResponseHeaders(405, -1);
-            ex.close();
-            return;
-        }
-        if (HttpUtil.usuarioAutenticado(ex) == null) {
-            HttpUtil.error(ex, 401, "No autorizado"); return;
-        }
+    public Respuesta manejar(Solicitud s) {
+        if (!"GET".equalsIgnoreCase(s.metodo())) return Respuesta.sinCuerpo(405);
+        if (HttpUtil.usuarioAutenticado(s) == null) return Respuesta.error(401, "No autorizado");
 
-        String[] p = ex.getRequestURI().getPath().split("/");
-        if (p.length < 4) { HttpUtil.error(ex, 400, "Falta el id"); return; }
+        String[] p = s.path().split("/");
+        if (p.length < 4) return Respuesta.error(400, "Falta el id");
 
         int id;
         try { id = Integer.parseInt(p[3]); }
-        catch (NumberFormatException e) { HttpUtil.error(ex, 400, "Id invalido"); return; }
+        catch (NumberFormatException e) { return Respuesta.error(400, "Id invalido"); }
 
         Cuenta c = repo.get(id);
-        if (c == null) { HttpUtil.error(ex, 404, "Cuenta no encontrada"); return; }
+        if (c == null) return Respuesta.error(404, "Cuenta no encontrada");
 
-        // JSON a mano en la ruta caliente (80% de la carga son lecturas): evita
-        // la reflexion de gson. Los nombres del dataset son ASCII sin comillas.
         String json = "{\"id\":" + c.id
                 + ",\"propietario\":\"" + c.propietario()
                 + "\",\"balance\":" + c.saldoDecimal().toPlainString() + "}";
-        HttpUtil.enviarJson(ex, 200, json);
+        return Respuesta.json(200, json);
     }
 }

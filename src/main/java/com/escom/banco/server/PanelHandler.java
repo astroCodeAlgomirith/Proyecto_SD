@@ -1,11 +1,11 @@
 package com.escom.banco.server;
 
 import com.escom.banco.json.Json;
+import com.escom.banco.server.http.Manejador;
+import com.escom.banco.server.http.Respuesta;
+import com.escom.banco.server.http.Solicitud;
 import com.google.gson.JsonObject;
-import com.sun.net.httpserver.HttpExchange;
-import com.sun.net.httpserver.HttpHandler;
 
-import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -18,10 +18,10 @@ import java.util.Map;
 
 /**
  * GET /panel -> agrega el /stats de este nodo + el de los peers (fetch del lado
- * del servidor, sin CORS). Lo consume dashboard.html. Los peers son host:port
- * de los OTROS nodos (su puerto HTTP), inyectados para poder probarlo.
+ * del servidor, sin CORS). Lo consume dashboard.html. Va al pool WORKER porque
+ * HttpClient.send a los peers es BLOQUEANTE (hasta 2s) y estancaria un reactor.
  */
-public class PanelHandler implements HttpHandler {
+public class PanelHandler implements Manejador {
 
     private final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(2)).build();
@@ -34,19 +34,15 @@ public class PanelHandler implements HttpHandler {
     }
 
     @Override
-    public void handle(HttpExchange ex) throws IOException {
-        if (!"GET".equalsIgnoreCase(ex.getRequestMethod())) {
-            ex.sendResponseHeaders(405, -1);
-            ex.close();
-            return;
-        }
+    public Respuesta manejar(Solicitud s) {
+        if (!"GET".equalsIgnoreCase(s.metodo())) return Respuesta.sinCuerpo(405);
         List<Map<String, Object>> nodos = new ArrayList<>();
         nodos.add(conMeta(idLocal, true, StatsHandler.snapshot()));
         for (String peer : peers) nodos.add(consultarPeer(peer));
 
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("nodos", nodos);
-        HttpUtil.enviarJson(ex, 200, Json.toJson(out));
+        return Respuesta.json(200, Json.toJson(out));
     }
 
     private Map<String, Object> consultarPeer(String hostPuerto) {
