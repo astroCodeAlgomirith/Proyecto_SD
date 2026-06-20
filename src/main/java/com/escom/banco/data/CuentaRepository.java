@@ -5,6 +5,8 @@ import com.escom.banco.model.Transaccion;
 
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
+import java.util.function.LongSupplier;
 
 /**
  * Almacen en memoria de las cuentas (sin SGBD, como exige el PDF).
@@ -23,6 +25,15 @@ public class CuentaRepository {
     private final AtomicLong totalTransferencias = new AtomicLong(0);
     private volatile long ultimaTxId = 0;
     private final RegistroTransacciones registro = new RegistroTransacciones();
+
+    // Observador del log durable (lo pone el lider): se le avisa cada commit.
+    private volatile Consumer<Transaccion> observador = t -> {};
+    // Conteo de tx en el log durable (Cloud Storage); -1 = deshabilitado.
+    private volatile LongSupplier conteoStorage = () -> -1L;
+
+    public void setObservador(Consumer<Transaccion> o) { this.observador = o; }
+    public void setConteoStorage(LongSupplier s) { this.conteoStorage = s; }
+    public long txEnStorage() { return conteoStorage.getAsLong(); }
 
     public void put(Cuenta c) { cuentas.put(c.id, c); }
     public Cuenta get(int id) { return cuentas.get(id); }
@@ -73,7 +84,9 @@ public class CuentaRepository {
             long seq = secuencia.incrementAndGet();
             totalTransferencias.incrementAndGet();
             ultimaTxId = seq;
-            registro.agregar(new Transaccion(seq, origenId, destinoId, montoCentavos));
+            Transaccion tx = new Transaccion(seq, origenId, destinoId, montoCentavos);
+            registro.agregar(tx);
+            observador.accept(tx);
             return Resultado.ok(seq);
         } finally {
             segundo.lock.unlock();

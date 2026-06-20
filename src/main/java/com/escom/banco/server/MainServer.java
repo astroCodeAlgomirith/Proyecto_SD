@@ -46,6 +46,22 @@ public class MainServer {
         iniciarReplicacion();
     }
 
+    /** Log durable en Cloud Storage (solo lider). Se activa con BANCO_GCS_BUCKET. */
+    private static void iniciarAlmacenGcs() {
+        String bucket = System.getenv("BANCO_GCS_BUCKET");
+        if (bucket == null || bucket.isBlank()) {
+            System.out.println("Log GCS deshabilitado (sin BANCO_GCS_BUCKET).");
+            return;
+        }
+        com.escom.banco.almacen.AlmacenGcs almacen =
+                new com.escom.banco.almacen.AlmacenGcs(
+                        new com.escom.banco.almacen.GcsSubidor(bucket));
+        almacen.iniciar();
+        CuentaRepository.get().setObservador(almacen::registrar);
+        CuentaRepository.get().setConteoStorage(almacen::escritos);
+        System.out.println("Log durable en GCS: bucket " + bucket);
+    }
+
     /** Peers del panel (host:port HTTP de los otros nodos) desde BANCO_PEERS. */
     private static java.util.List<String> leerPeers() {
         String env = System.getenv("BANCO_PEERS");
@@ -69,6 +85,7 @@ public class MainServer {
         if (liderHost == null || liderHost.isBlank()) {
             new ServidorReplicacion(CuentaRepository.get(), puertoRepl).iniciar();
             System.out.println("Rol: LIDER - replicacion TCP en puerto " + puertoRepl);
+            iniciarAlmacenGcs();
         } else {
             new ClienteReplicacion(CuentaRepository.get(), liderHost, puertoRepl).iniciar();
             System.out.println("Rol: REPLICA - siguiendo a " + liderHost + ":" + puertoRepl);
