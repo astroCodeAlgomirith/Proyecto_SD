@@ -21,12 +21,20 @@ import java.util.concurrent.atomic.LongAdder;
  * mantiene una ventana de N peticiones EN VUELO con sendAsync + un semaforo. Asi
  * una sola maquina sostiene mucha mas concurrencia sin gastar N hilos del SO.
  *
- * Uso: java -cp banco.jar com.escom.banco.carga.GeneradorCarga <host> <puerto> [segundos] [enVuelo]
+ * Uso: java -cp banco.jar com.escom.banco.carga.GeneradorCarga <host> <puerto> [segundos] [enVuelo] [clientes]
  */
 public final class GeneradorCarga {
 
-    /** Parametros de una corrida (enVuelo = peticiones concurrentes en vuelo). */
-    public record Config(String host, int puerto, int segundos, int enVuelo, long montoMaxCent) {}
+    /** Parametros de una corrida (enVuelo = peticiones concurrentes en vuelo;
+     *  clientes = numero de HttpClient independientes, cada uno con su propio
+     *  selector, para repartir la carga y no toparse en un solo hilo de I/O). */
+    public record Config(String host, int puerto, int segundos, int enVuelo,
+                         long montoMaxCent, int clientes) {
+        /** Conveniencia: un solo HttpClient (comportamiento original). */
+        public Config(String host, int puerto, int segundos, int enVuelo, long montoMaxCent) {
+            this(host, puerto, segundos, enVuelo, montoMaxCent, 1);
+        }
+    }
 
     /** Reporte de una corrida. */
     public static final class Resultado {
@@ -65,17 +73,19 @@ public final class GeneradorCarga {
         if (cuentas < 2) throw new IllegalStateException("El nodo no tiene cuentas cargadas.");
         long saldoInicial = leerStats().get("saldoTotalCentavos").getAsLong();
 
-        int ventana = Math.max(1, cfg.enVuelo());
-        Semaphore permisos = new Semaphore(ventana);
+        int k = Math.max(1, cfg.clientes());
+        int ventana = Math.max(1, cfg.enVuelo() / k); // ventana POR cliente
         long fin = System.nanoTime() + cfg.segundos() * 1_000_000_000L;
 
-        while (System.nanoTime() < fin) {
-            permisos.acquire();
-            if (System.nanoTime() >= fin) { permisos.release(); break; }
-            lanzarUna(cuentas, permisos);
+        Thread[] hilos = new Thread[k];
+        for (int i = 0; i < k; i++) {
+            HttpClient cliente = HttpClient.newBuilder()
+                    .version(HttpClient.Version.HTTP_1_1)
+                    .connectTimeout(Duration.ofSeconds(5)).build();
+            hilos[i] = new Thread(() -> motor(cliente, cuentas, ventana, fin), "motor-" + i);
         }
-        // Esperar a que drenen las peticiones en vuelo (recuperar todos los permisos).
-        permisos.acquire(ventana);
+        for (Thread h : hilos) h.start();
+        for (Thread h : hilos) h.join();
 
         long saldoFinal = leerStats().get("saldoTotalCentavos").getAsLong();
 
@@ -89,8 +99,23 @@ public final class GeneradorCarga {
         return r;
     }
 
+    /** Un motor = un HttpClient (su propio selector) emitiendo hasta llenar su ventana. */
+    private void motor(HttpClient cliente, int cuentas, int ventana, long fin) {
+        Semaphore permisos = new Semaphore(ventana);
+        try {
+            while (System.nanoTime() < fin) {
+                permisos.acquire();
+                if (System.nanoTime() >= fin) { permisos.release(); break; }
+                lanzarUna(cliente, cuentas, permisos);
+            }
+            permisos.acquire(ventana); // drenar las peticiones en vuelo de este motor
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
     /** Lanza una peticion asincrona (80% lectura, 20% transferencia) y libera el permiso al terminar. */
-    private void lanzarUna(int cuentas, Semaphore permisos) {
+    private void lanzarUna(HttpClient cliente, int cuentas, Semaphore permisos) {
         ThreadLocalRandom rnd = ThreadLocalRandom.current();
         HttpRequest req;
         boolean lectura = rnd.nextInt(100) < 80;
@@ -110,7 +135,7 @@ public final class GeneradorCarga {
                     .header("Content-Type", "application/json")
                     .POST(HttpRequest.BodyPublishers.ofString(body)).build();
         }
-        http.sendAsync(req, BodyHandlers.discarding())
+        cliente.sendAsync(req, BodyHandlers.discarding())
                 .thenAccept(resp -> contar(lectura, resp.statusCode()))
                 .whenComplete((v, e) -> permisos.release());
     }
@@ -150,17 +175,18 @@ public final class GeneradorCarga {
 
     public static void main(String[] args) throws Exception {
         if (args.length < 2) {
-            System.err.println("Uso: GeneradorCarga <host> <puerto> [segundos=60] [enVuelo=512]");
+            System.err.println("Uso: GeneradorCarga <host> <puerto> [segundos=60] [enVuelo=512] [clientes=1]");
             System.exit(2);
         }
         String host = args[0];
         int puerto = Integer.parseInt(args[1]);
         int segundos = args.length > 2 ? Integer.parseInt(args[2]) : 60;
         int enVuelo = args.length > 3 ? Integer.parseInt(args[3]) : 512;
+        int clientes = args.length > 4 ? Integer.parseInt(args[4]) : 1;
 
-        Config cfg = new Config(host, puerto, segundos, enVuelo, 10000);
-        System.out.printf("Cargando %s:%d  %ds  %d en vuelo  (80%% lecturas / 20%% transferencias)%n",
-                host, puerto, segundos, enVuelo);
+        Config cfg = new Config(host, puerto, segundos, enVuelo, 10000, clientes);
+        System.out.printf("Cargando %s:%d  %ds  %d en vuelo  %d cliente(s)  (80%% lecturas / 20%% transferencias)%n",
+                host, puerto, segundos, enVuelo, clientes);
 
         Resultado r = new GeneradorCarga(cfg).ejecutar();
 
