@@ -27,6 +27,14 @@ Variables de entorno:
 - `ALUMNOS_CSV` - ruta del CSV (por defecto `./alumnos.csv`).
 - `BANCO_JWT_SECRET` - secreto JWT compartido por los 3 nodos.
 
+## Pruebas
+
+Harness propio en Java puro (sin JUnit), en `src/test/java/pruebas`:
+
+```bash
+./ejecutar_tests.sh    # compila y corre pruebas.TestRunner (exit != 0 si falla)
+```
+
 ## Endpoints
 
 | Metodo | Ruta | JWT | Cuerpo / respuesta |
