@@ -31,6 +31,12 @@ public class MainServer {
 
         String idLocal = System.getenv().getOrDefault("BANCO_NODO_ID", "nodo-" + puerto);
         java.util.List<String> peers = leerPeers();
+
+        // El lider recupera el estado desde el log GCS ANTES de servir trafico y
+        // de enganchar el observador (asi el replay no se reescribe en GCS).
+        boolean esLider = esLider();
+        if (esLider) iniciarAlmacenGcs();
+
         HttpServer server = BancoHttp.crear(puerto, idLocal, peers);
         server.start();
 
@@ -46,19 +52,35 @@ public class MainServer {
         iniciarReplicacion();
     }
 
-    /** Log durable en Cloud Storage (solo lider). Se activa con BANCO_GCS_BUCKET. */
+    /**
+     * Log durable en Cloud Storage (solo lider). Se activa con BANCO_GCS_BUCKET.
+     * Primero reaplica el log existente sobre el estado del CSV (recuperacion en
+     * frio si fallaron todos los nodos) y luego engancha el observador para los
+     * nuevos commits. Nota: las cuentas creadas via /api/register que no esten
+     * en el CSV no se recuperan; la prueba del PDF usa las cuentas del dataset.
+     */
     private static void iniciarAlmacenGcs() {
         String bucket = System.getenv("BANCO_GCS_BUCKET");
         if (bucket == null || bucket.isBlank()) {
             System.out.println("Log GCS deshabilitado (sin BANCO_GCS_BUCKET).");
             return;
         }
+        CuentaRepository repo = CuentaRepository.get();
         com.escom.banco.almacen.AlmacenGcs almacen =
                 new com.escom.banco.almacen.AlmacenGcs(
                         new com.escom.banco.almacen.GcsSubidor(bucket));
-        almacen.iniciar();
-        CuentaRepository.get().setObservador(almacen::registrar);
-        CuentaRepository.get().setConteoStorage(almacen::escritos);
+
+        long t0 = System.nanoTime();
+        long recuperadas = almacen.recuperar(repo::aplicarReplica);
+        long ms = (System.nanoTime() - t0) / 1_000_000;
+        if (recuperadas > 0) {
+            System.out.printf("Recuperadas %,d tx del log GCS en %d ms (seq=%d).%n",
+                    recuperadas, ms, repo.secuenciaActual());
+        }
+
+        almacen.iniciar(recuperadas);
+        repo.setObservador(almacen::registrar);
+        repo.setConteoStorage(almacen::escritos);
         System.out.println("Log durable en GCS: bucket " + bucket);
     }
 
@@ -74,19 +96,25 @@ public class MainServer {
         return lista;
     }
 
+    /** LIDER si no hay BANCO_LIDER_HOST; en otro caso REPLICA. */
+    private static boolean esLider() {
+        String liderHost = System.getenv("BANCO_LIDER_HOST");
+        return liderHost == null || liderHost.isBlank();
+    }
+
     /**
      * Rol por variables de entorno: sin BANCO_LIDER_HOST -> LIDER (sirve el log);
-     * con BANCO_LIDER_HOST -> REPLICA (sigue al lider y aplica en vivo).
+     * con BANCO_LIDER_HOST -> REPLICA (sigue al lider y aplica en vivo). El log
+     * GCS del lider ya se inicio antes de servir trafico (ver main).
      */
     private static void iniciarReplicacion() throws Exception {
         int puertoRepl = Integer.parseInt(
                 System.getenv().getOrDefault("BANCO_REPLICACION_PUERTO", "9090"));
-        String liderHost = System.getenv("BANCO_LIDER_HOST");
-        if (liderHost == null || liderHost.isBlank()) {
+        if (esLider()) {
             new ServidorReplicacion(CuentaRepository.get(), puertoRepl).iniciar();
             System.out.println("Rol: LIDER - replicacion TCP en puerto " + puertoRepl);
-            iniciarAlmacenGcs();
         } else {
+            String liderHost = System.getenv("BANCO_LIDER_HOST");
             new ClienteReplicacion(CuentaRepository.get(), liderHost, puertoRepl).iniciar();
             System.out.println("Rol: REPLICA - siguiendo a " + liderHost + ":" + puertoRepl);
         }

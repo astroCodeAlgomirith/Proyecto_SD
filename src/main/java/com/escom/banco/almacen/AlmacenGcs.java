@@ -2,10 +2,14 @@ package com.escom.banco.almacen;
 
 import com.escom.banco.model.Transaccion;
 
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 
 /**
  * Log durable de transacciones en Cloud Storage. Escribe en segundo plano (una
@@ -20,6 +24,8 @@ public final class AlmacenGcs {
         boolean subir(Transaccion t) throws Exception;
         /** Cuantos objetos ya existen en el bucket (para sembrar el contador). */
         default long contarExistentes() { return 0; }
+        /** Todas las tx del log (para recuperar el estado en un arranque en frio). */
+        default List<Transaccion> leerTodas() throws Exception { return List.of(); }
     }
 
     private static final int REINTENTOS = 3;
@@ -33,11 +39,34 @@ public final class AlmacenGcs {
     public AlmacenGcs(Subidor subidor) { this.subidor = subidor; }
 
     public void iniciar() {
-        escritos.set(Math.max(0, subidor.contarExistentes()));
+        iniciar(subidor.contarExistentes());
+    }
+
+    /** Arranca el worker sembrando el contador con un valor ya conocido. */
+    public void iniciar(long escritosIniciales) {
+        escritos.set(Math.max(0, escritosIniciales));
         activo = true;
         worker = new Thread(this::correr, "gcs-log");
         worker.setDaemon(true);
         worker.start();
+    }
+
+    /**
+     * Reaplica todo el log durable sobre el repo (recuperacion en frio cuando
+     * fallaron todos los nodos). Reaplica en orden de seq via aplicarReplica,
+     * que no revalida saldos ni reescribe en GCS. Devuelve cuantas tx reaplico.
+     */
+    public long recuperar(Consumer<Transaccion> aplicar) {
+        List<Transaccion> txs;
+        try {
+            txs = new ArrayList<>(subidor.leerTodas());
+        } catch (Exception e) {
+            System.err.println("GCS: no se pudo leer el log para recuperar: " + e);
+            return 0;
+        }
+        txs.sort(Comparator.comparingLong(Transaccion::seq));
+        for (Transaccion t : txs) aplicar.accept(t);
+        return txs.size();
     }
 
     /** Encola una transaccion para persistirla (no bloquea). */

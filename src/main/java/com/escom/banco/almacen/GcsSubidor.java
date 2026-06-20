@@ -11,6 +11,8 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse.BodyHandlers;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Subidor real a Cloud Storage usando solo el JDK (sin la libreria de Google):
@@ -66,6 +68,44 @@ public final class GcsSubidor implements AlmacenGcs.Subidor {
             return 0; // si no podemos listar, empezamos el contador en 0
         }
         return total;
+    }
+
+    @Override
+    public List<Transaccion> leerTodas() throws Exception {
+        List<Transaccion> txs = new ArrayList<>();
+        String pageToken = null;
+        do {
+            String url = "https://storage.googleapis.com/storage/v1/b/" + bucket
+                    + "/o?prefix=transactions/&fields=items/name,nextPageToken&maxResults=1000"
+                    + (pageToken == null ? "" : "&pageToken=" + pageToken);
+            HttpRequest req = HttpRequest.newBuilder(URI.create(url))
+                    .header("Authorization", "Bearer " + obtenerToken())
+                    .timeout(Duration.ofSeconds(10)).GET().build();
+            JsonObject j = Json.parse(http.send(req, BodyHandlers.ofString()).body());
+            if (j.has("items")) {
+                for (var item : j.getAsJsonArray("items")) {
+                    String nombre = item.getAsJsonObject().get("name").getAsString();
+                    txs.add(descargar(nombre));
+                }
+            }
+            pageToken = j.has("nextPageToken") ? j.get("nextPageToken").getAsString() : null;
+        } while (pageToken != null);
+        return txs;
+    }
+
+    /** Baja un objeto del log y lo parsea a mano (campos simples: ints y longs). */
+    private Transaccion descargar(String nombre) throws Exception {
+        String url = "https://storage.googleapis.com/storage/v1/b/" + bucket
+                + "/o/" + URLEncoder.encode(nombre, StandardCharsets.UTF_8) + "?alt=media";
+        HttpRequest req = HttpRequest.newBuilder(URI.create(url))
+                .header("Authorization", "Bearer " + obtenerToken())
+                .timeout(Duration.ofSeconds(10)).GET().build();
+        JsonObject j = Json.parse(http.send(req, BodyHandlers.ofString()).body());
+        return new Transaccion(
+                j.get("seq").getAsLong(),
+                j.get("origenId").getAsInt(),
+                j.get("destinoId").getAsInt(),
+                j.get("montoCentavos").getAsLong());
     }
 
     private String obtenerToken() throws Exception {
