@@ -29,7 +29,9 @@ public class MainServer {
         long ms = (System.nanoTime() - t0) / 1_000_000;
         System.out.printf("Cargadas %,d cuentas en %d ms.%n", n, ms);
 
-        HttpServer server = BancoHttp.crear(puerto);
+        String idLocal = System.getenv().getOrDefault("BANCO_NODO_ID", "nodo-" + puerto);
+        java.util.List<String> peers = leerPeers();
+        HttpServer server = BancoHttp.crear(puerto, idLocal, peers);
         server.start();
 
         System.out.println("Nodo del banco escuchando en http://0.0.0.0:" + puerto);
@@ -38,8 +40,22 @@ public class MainServer {
         System.out.println("  GET  /api/accounts/{id}            (JWT)");
         System.out.println("  POST /api/transactions/transfer    (JWT)");
         System.out.println("  GET  /stats");
+        System.out.println("  GET  /         (panel) y /panel (JSON agregado)");
+        if (!peers.isEmpty()) System.out.println("  Peers del panel: " + peers);
 
         iniciarReplicacion();
+    }
+
+    /** Peers del panel (host:port HTTP de los otros nodos) desde BANCO_PEERS. */
+    private static java.util.List<String> leerPeers() {
+        String env = System.getenv("BANCO_PEERS");
+        if (env == null || env.isBlank()) return java.util.List.of();
+        java.util.List<String> lista = new java.util.ArrayList<>();
+        for (String p : env.split(",")) {
+            String t = p.trim();
+            if (!t.isEmpty()) lista.add(t);
+        }
+        return lista;
     }
 
     /**

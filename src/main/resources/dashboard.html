@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mini Banco Distribuido - Panel</title>
+<style>
+  body { font-family: system-ui, Arial, sans-serif; margin: 24px; background: #0f1115; color: #e6e6e6; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: #8a8f98; font-size: 13px; margin-bottom: 18px; }
+  .grid { display: flex; flex-wrap: wrap; gap: 16px; }
+  .nodo { background: #1a1d24; border: 1px solid #2a2e37; border-radius: 10px; padding: 16px; width: 280px; }
+  .nodo h2 { font-size: 15px; margin: 0 0 10px; display: flex; justify-content: space-between; }
+  .badge { font-size: 11px; padding: 2px 8px; border-radius: 10px; }
+  .lider { background: #1f6feb33; color: #79b8ff; }
+  .replica { background: #2ea04333; color: #7ee787; }
+  .caida { background: #f8514933; color: #ff7b72; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  td { padding: 4px 0; border-bottom: 1px solid #23262e; }
+  td.k { color: #8a8f98; }
+  td.v { text-align: right; font-variant-numeric: tabular-nums; }
+  .bar { height: 6px; background: #23262e; border-radius: 4px; overflow: hidden; margin-top: 2px; }
+  .bar > div { height: 100%; background: #1f6feb; }
+  .total { margin-top: 16px; font-size: 13px; color: #8a8f98; }
+  .ok { color: #7ee787; } .mal { color: #ff7b72; }
+</style>
+</head>
+<body>
+  <h1>Mini Banco Concurrente Distribuido</h1>
+  <div class="sub">Panel en tiempo real - actualiza cada 2 s - <span id="reloj">--:--:--</span></div>
+  <div id="grid" class="grid"></div>
+  <div id="total" class="total"></div>
+
+<script>
+function pct(v) { return (v == null ? 0 : v).toFixed(1) + "%"; }
+function dinero(c) { return (c / 100).toLocaleString("es-MX", {minimumFractionDigits: 2}); }
+
+function fila(k, v) { return '<tr><td class="k">' + k + '</td><td class="v">' + v + '</td></tr>'; }
+function barra(v) { return '<div class="bar"><div style="width:' + Math.min(100, v||0) + '%"></div></div>'; }
+
+function tarjeta(n) {
+  var clase = !n.alcanzable ? "caida" : (n.rol === "LIDER" ? "lider" : "replica");
+  var etiqueta = !n.alcanzable ? "CAIDO" : n.rol;
+  var cuerpo = "";
+  if (n.alcanzable) {
+    cuerpo =
+      fila("Cuentas", (n.cuentas||0).toLocaleString("es-MX")) +
+      fila("Saldo total", "$" + dinero(n.saldoTotalCentavos||0)) +
+      fila("Transferencias", (n.transferencias||0).toLocaleString("es-MX")) +
+      fila("Ultima tx", n.ultimaTxId||0) +
+      fila("Tx en Storage", n.txEnStorage < 0 ? "-" : n.txEnStorage) +
+      fila("CPU", pct(n.cpu) + barra(n.cpu)) +
+      fila("RAM", pct(n.ram) + barra(n.ram)) +
+      fila("Disco", pct(n.disco) + barra(n.disco));
+  } else {
+    cuerpo = fila("Estado", "sin respuesta");
+  }
+  return '<div class="nodo"><h2>' + n.host + '<span class="badge ' + clase + '">' +
+         etiqueta + '</span></h2><table>' + cuerpo + '</table></div>';
+}
+
+function pintar(data) {
+  var nodos = data.nodos || [];
+  document.getElementById("grid").innerHTML = nodos.map(tarjeta).join("");
+
+  var vivos = nodos.filter(function(n){ return n.alcanzable; });
+  var sumas = vivos.map(function(n){ return n.saldoTotalCentavos||0; });
+  var consistente = sumas.every(function(s){ return s === sumas[0]; });
+  var nodosTxt = vivos.length + "/" + nodos.length + " nodos en linea";
+  var inv = vivos.length > 1
+    ? (consistente ? '<span class="ok">saldos consistentes entre nodos</span>'
+                   : '<span class="mal">SALDOS INCONSISTENTES</span>')
+    : "";
+  document.getElementById("total").innerHTML = nodosTxt + (inv ? " - " + inv : "");
+}
+
+function refrescar() {
+  fetch("/panel").then(function(r){ return r.json(); })
+    .then(pintar)
+    .catch(function(){ document.getElementById("total").innerHTML =
+      '<span class="mal">no se pudo contactar al nodo</span>'; })
+    .finally(function(){
+      document.getElementById("reloj").textContent = new Date().toLocaleTimeString("es-MX");
+    });
+}
+
+refrescar();
+setInterval(refrescar, 2000);
+</script>
+</body>
+</html>
