@@ -10,6 +10,8 @@ public final class TestRunner {
         CuentaRepositoryTest.run();
         System.out.println("== AlumnosLoaderTest ==");
         AlumnosLoaderTest.run();
+        System.out.println("== ReplicacionTest ==");
+        ReplicacionTest.run();
         System.out.printf("%nResultado: %d pasadas, %d fallidas%n",
                 MiniTest.pasadas(), MiniTest.fallidas());
         if (MiniTest.fallidas() > 0) System.exit(1);

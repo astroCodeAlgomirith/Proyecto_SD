@@ -1,6 +1,7 @@
 package com.escom.banco.data;
 
 import com.escom.banco.model.Cuenta;
+import com.escom.banco.model.Transaccion;
 
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
@@ -21,6 +22,7 @@ public class CuentaRepository {
     private final AtomicLong secuencia = new AtomicLong(0);
     private final AtomicLong totalTransferencias = new AtomicLong(0);
     private volatile long ultimaTxId = 0;
+    private final RegistroTransacciones registro = new RegistroTransacciones();
 
     public void put(Cuenta c) { cuentas.put(c.id, c); }
     public Cuenta get(int id) { return cuentas.get(id); }
@@ -29,6 +31,7 @@ public class CuentaRepository {
     public long totalTransferencias() { return totalTransferencias.get(); }
     public long ultimaTxId() { return ultimaTxId; }
     public long secuenciaActual() { return secuencia.get(); }
+    public RegistroTransacciones registro() { return registro; }
 
     /** Suma de todos los saldos en centavos (para verificar el invariante). */
     public long saldoTotalCentavos() {
@@ -70,7 +73,34 @@ public class CuentaRepository {
             long seq = secuencia.incrementAndGet();
             totalTransferencias.incrementAndGet();
             ultimaTxId = seq;
+            registro.agregar(new Transaccion(seq, origenId, destinoId, montoCentavos));
             return Resultado.ok(seq);
+        } finally {
+            segundo.lock.unlock();
+            primero.lock.unlock();
+        }
+    }
+
+    /**
+     * Aplica una transaccion replicada del lider (ya validada alla): mueve el
+     * monto, registra la tx y avanza la secuencia local a t.seq().
+     */
+    public void aplicarReplica(Transaccion t) {
+        Cuenta origen = cuentas.get(t.origenId());
+        Cuenta destino = cuentas.get(t.destinoId());
+        if (origen == null || destino == null) return;
+
+        Cuenta primero = t.origenId() < t.destinoId() ? origen : destino;
+        Cuenta segundo = t.origenId() < t.destinoId() ? destino : origen;
+        primero.lock.lock();
+        segundo.lock.lock();
+        try {
+            origen.setSaldoCentavos(origen.getSaldoCentavos() - t.montoCentavos());
+            destino.setSaldoCentavos(destino.getSaldoCentavos() + t.montoCentavos());
+            registro.agregar(t);
+            totalTransferencias.incrementAndGet();
+            ultimaTxId = t.seq();
+            secuencia.accumulateAndGet(t.seq(), Math::max);
         } finally {
             segundo.lock.unlock();
             primero.lock.unlock();
