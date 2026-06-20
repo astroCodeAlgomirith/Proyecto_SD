@@ -6,9 +6,9 @@ import com.google.gson.JsonObject;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.net.http.HttpResponse.BodyHandlers;
 import java.time.Duration;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.LongAdder;
 
@@ -17,12 +17,16 @@ import java.util.concurrent.atomic.LongAdder;
  * 20% transferencias concurrentes y verifica que la suma total de saldos no
  * cambie (invariante de conservacion). Java puro, sin dependencias nuevas.
  *
- * Uso: java -cp banco.jar com.escom.banco.carga.GeneradorCarga <host> <puerto> [segundos] [hilos]
+ * Motor asincrono: en vez de un hilo por peticion (1 envio bloqueante a la vez),
+ * mantiene una ventana de N peticiones EN VUELO con sendAsync + un semaforo. Asi
+ * una sola maquina sostiene mucha mas concurrencia sin gastar N hilos del SO.
+ *
+ * Uso: java -cp banco.jar com.escom.banco.carga.GeneradorCarga <host> <puerto> [segundos] [enVuelo]
  */
 public final class GeneradorCarga {
 
-    /** Parametros de una corrida. */
-    public record Config(String host, int puerto, int segundos, int hilos, long montoMaxCent) {}
+    /** Parametros de una corrida (enVuelo = peticiones concurrentes en vuelo). */
+    public record Config(String host, int puerto, int segundos, int enVuelo, long montoMaxCent) {}
 
     /** Reporte de una corrida. */
     public static final class Resultado {
@@ -36,7 +40,7 @@ public final class GeneradorCarga {
         public long deltaCent() { return saldoFinalCent - saldoInicialCent; }
     }
 
-    // Un solo cliente HTTP/1.1 con keep-alive, reutilizado por todos los hilos.
+    // Un solo cliente HTTP/1.1 con keep-alive, compartido por todas las peticiones.
     private final HttpClient http = HttpClient.newBuilder()
             .version(HttpClient.Version.HTTP_1_1)
             .connectTimeout(Duration.ofSeconds(5))
@@ -61,13 +65,17 @@ public final class GeneradorCarga {
         if (cuentas < 2) throw new IllegalStateException("El nodo no tiene cuentas cargadas.");
         long saldoInicial = leerStats().get("saldoTotalCentavos").getAsLong();
 
-        Thread[] hilos = new Thread[cfg.hilos()];
+        int ventana = Math.max(1, cfg.enVuelo());
+        Semaphore permisos = new Semaphore(ventana);
         long fin = System.nanoTime() + cfg.segundos() * 1_000_000_000L;
-        for (int i = 0; i < hilos.length; i++) {
-            hilos[i] = new Thread(() -> trabajar(fin, cuentas), "carga-" + i);
-            hilos[i].start();
+
+        while (System.nanoTime() < fin) {
+            permisos.acquire();
+            if (System.nanoTime() >= fin) { permisos.release(); break; }
+            lanzarUna(cuentas, permisos);
         }
-        for (Thread t : hilos) t.join();
+        // Esperar a que drenen las peticiones en vuelo (recuperar todos los permisos).
+        permisos.acquire(ventana);
 
         long saldoFinal = leerStats().get("saldoTotalCentavos").getAsLong();
 
@@ -81,44 +89,38 @@ public final class GeneradorCarga {
         return r;
     }
 
-    /** Bucle de un hilo: 80% lecturas, 20% transferencias hasta la fecha limite. */
-    private void trabajar(long finNanos, int cuentas) {
+    /** Lanza una peticion asincrona (80% lectura, 20% transferencia) y libera el permiso al terminar. */
+    private void lanzarUna(int cuentas, Semaphore permisos) {
         ThreadLocalRandom rnd = ThreadLocalRandom.current();
-        while (System.nanoTime() < finNanos) {
-            try {
-                if (rnd.nextInt(100) < 80) {
-                    leer(1 + rnd.nextInt(cuentas));
-                } else {
-                    int origen = 1 + rnd.nextInt(cuentas);
-                    int destino = 1 + rnd.nextInt(cuentas);
-                    long montoCent = 1 + rnd.nextLong(cfg.montoMaxCent());
-                    transferir(origen, destino, montoCent);
-                }
-            } catch (Exception e) {
-                // Una peticion suelta puede fallar bajo carga; no abortamos la corrida.
-            }
+        HttpRequest req;
+        boolean lectura = rnd.nextInt(100) < 80;
+        if (lectura) {
+            int id = 1 + rnd.nextInt(cuentas);
+            req = HttpRequest.newBuilder(URI.create(base + "/api/accounts/" + id))
+                    .header("Authorization", autorizacion).GET().build();
+        } else {
+            int origen = 1 + rnd.nextInt(cuentas);
+            int destino = 1 + rnd.nextInt(cuentas);
+            long montoCent = 1 + rnd.nextLong(cfg.montoMaxCent());
+            String body = "{\"sourceAccountId\":\"" + origen
+                    + "\",\"targetAccountId\":\"" + destino
+                    + "\",\"amount\":" + centavosAJson(montoCent) + "}";
+            req = HttpRequest.newBuilder(URI.create(base + "/api/transactions/transfer"))
+                    .header("Authorization", autorizacion)
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString(body)).build();
         }
+        http.sendAsync(req, BodyHandlers.discarding())
+                .thenAccept(resp -> contar(lectura, resp.statusCode()))
+                .whenComplete((v, e) -> permisos.release());
     }
 
-    private void leer(int id) throws Exception {
-        HttpRequest req = HttpRequest.newBuilder(URI.create(base + "/api/accounts/" + id))
-                .header("Authorization", autorizacion)
-                .GET().build();
-        int sc = http.send(req, BodyHandlers.discarding()).statusCode();
-        if (sc == 200) lecturas.increment();
-    }
-
-    private void transferir(int origen, int destino, long montoCent) throws Exception {
-        String body = "{\"sourceAccountId\":\"" + origen
-                + "\",\"targetAccountId\":\"" + destino
-                + "\",\"amount\":" + centavosAJson(montoCent) + "}";
-        HttpRequest req = HttpRequest.newBuilder(URI.create(base + "/api/transactions/transfer"))
-                .header("Authorization", autorizacion)
-                .header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString(body)).build();
-        int sc = http.send(req, BodyHandlers.discarding()).statusCode();
-        if (sc == 200) transOk.increment();
-        else transFallidas.increment(); // saldo insuficiente, misma cuenta, etc.
+    private void contar(boolean lectura, int sc) {
+        if (lectura) {
+            if (sc == 200) lecturas.increment();
+        } else {
+            if (sc == 200) transOk.increment(); else transFallidas.increment();
+        }
     }
 
     /** centavos -> "123.45" sin usar double (evita perder exactitud). */
@@ -148,17 +150,17 @@ public final class GeneradorCarga {
 
     public static void main(String[] args) throws Exception {
         if (args.length < 2) {
-            System.err.println("Uso: GeneradorCarga <host> <puerto> [segundos=60] [hilos=100]");
+            System.err.println("Uso: GeneradorCarga <host> <puerto> [segundos=60] [enVuelo=512]");
             System.exit(2);
         }
         String host = args[0];
         int puerto = Integer.parseInt(args[1]);
         int segundos = args.length > 2 ? Integer.parseInt(args[2]) : 60;
-        int hilos = args.length > 3 ? Integer.parseInt(args[3]) : 100;
+        int enVuelo = args.length > 3 ? Integer.parseInt(args[3]) : 512;
 
-        Config cfg = new Config(host, puerto, segundos, hilos, 10000);
-        System.out.printf("Cargando %s:%d  %ds  %d hilos  (80%% lecturas / 20%% transferencias)%n",
-                host, puerto, segundos, hilos);
+        Config cfg = new Config(host, puerto, segundos, enVuelo, 10000);
+        System.out.printf("Cargando %s:%d  %ds  %d en vuelo  (80%% lecturas / 20%% transferencias)%n",
+                host, puerto, segundos, enVuelo);
 
         Resultado r = new GeneradorCarga(cfg).ejecutar();
 
