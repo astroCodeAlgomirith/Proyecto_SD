@@ -31,7 +31,6 @@
             <artifactId>gson</artifactId>
             <version>2.13.1</version>
         </dependency>
-        <!-- google-cloud-storage se agregara en la fase de log durable (GCS) -->
     </dependencies>
 
     <build>
