@@ -1,0 +1,104 @@
+% ============================================================================
+%  caratula.sty  -  Portada reutilizable del Proyecto Final de Sistemas
+%  Distribuidos (ESCOM-IPN, Equipo 17). Lenguaje visual inspirado en el
+%  sistema de diseno glab-esimez (guinda + Plus Jakarta Sans, blobs de luz).
+%  Compilar con LUALATEX o XELATEX (las fuentes viven en fonts/).
+%
+%  Uso:
+%      \usepackage{caratula}
+%      \portada{Documentación de\\Arquitectura}{Descripción corta del documento.}
+%
+%  Los datos del equipo viven UNA sola vez aqui abajo (fuente de verdad).
+% ============================================================================
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{caratula}[2026/06/21 Portada Proyecto Final SD (estilo glab)]
+
+\RequirePackage{fontspec}
+\RequirePackage[table]{xcolor}
+\RequirePackage{tikz}
+\RequirePackage{microtype}
+
+% ------------------------------ escala guinda (IPN, Pantone 222C) -----------
+\definecolor{guinda100}{HTML}{F6EAF1}
+\definecolor{guinda200}{HTML}{EBD2E0}
+\definecolor{guinda300}{HTML}{DAAEC6}
+\definecolor{guinda400}{HTML}{C17EA4}
+\definecolor{guinda500}{HTML}{A35480}
+\definecolor{guinda}{HTML}{6F1D46}      % guinda-700
+\definecolor{guinda800}{HTML}{5C1839}
+\definecolor{guinda900}{HTML}{4A132E}
+\definecolor{guinda950}{HTML}{2E0A1C}
+
+% ------------------------------ fuentes -------------------------------------
+\providecommand{\caratulafontpath}{fonts/}
+\defaultfontfeatures{Ligatures=TeX}
+\newfontfamily\jakarta{PlusJakartaSans-Regular}[Path=\caratulafontpath,Extension=.ttf]
+\newfontfamily\jakartamedium{PlusJakartaSans-Medium}[Path=\caratulafontpath,Extension=.ttf]
+\newfontfamily\jakartasemibold{PlusJakartaSans-SemiBold}[Path=\caratulafontpath,Extension=.ttf]
+\newfontfamily\jakartaextrabold{PlusJakartaSans-ExtraBold}[Path=\caratulafontpath,Extension=.ttf]
+
+% ------------------------- datos del equipo (EDITAR) ------------------------
+\def\unidadAprendizaje{Sistemas Distribuidos}
+\def\equipoNum{17}
+\def\fechaPortada{Junio 2026}
+\def\profesorSD{M. en C. Ukranio Coronilla}
+\def\integranteUno{Eduardo Alonso Sánchez}            \def\grupoUno{7CM3}
+\def\integranteDos{Vania Ivonne Arévalo del Ángel}    \def\grupoDos{7CM4}
+\def\integranteTres{Miriam Guadalupe Ramírez Sánchez} \def\grupoTres{7CM2}
+
+% ------------------------- logo: fachada de banco en mosaico ----------------
+\newcommand{\bancologo}[1][1]{%
+  \begin{tikzpicture}[scale=#1,line cap=round,line join=round]
+    \fill[guinda,rounded corners=3.2pt] (0,0) rectangle (1.2,1.2);
+    \begin{scope}[shift={(0.6,0.6)},white,line width=1.25pt]
+      \draw[fill=white,draw=white] (-0.34,0.14)--(0,0.36)--(0.34,0.14)--cycle; % fronton
+      \draw (-0.30,0.07)--(0.30,0.07);                                          % arquitrabe
+      \foreach \x in {-0.24,-0.08,0.08,0.24} \draw (\x,0.04)--(\x,-0.22);       % columnas
+      \draw (-0.34,-0.27)--(0.34,-0.27);                                        % base
+    \end{scope}
+  \end{tikzpicture}}
+
+% =============================== \portada ===================================
+% #1 = titulo del documento (admite \\)   #2 = descripcion corta
+\newcommand{\portada}[2]{%
+\begin{titlepage}
+\thispagestyle{empty}
+\begin{tikzpicture}[remember picture,overlay]
+  % fondo + blobs de luz
+  \fill[guinda950] (current page.south west) rectangle (current page.north east);
+  \fill[guinda900,opacity=0.55] ([xshift=-4cm,yshift=5cm]current page.east) circle (7cm);
+  \fill[guinda,opacity=0.32]   ([xshift=3cm,yshift=-3cm]current page.north west) circle (6cm);
+  \fill[guinda800,opacity=0.30] ([xshift=2cm,yshift=4cm]current page.south east) circle (5.5cm);
+
+  % --- marca arriba a la izquierda ---
+  \node[anchor=north west,xshift=2.4cm,yshift=-2.3cm] at (current page.north west) {\bancologo[1.05]};
+  \node[anchor=north west,xshift=4.15cm,yshift=-2.52cm,text=white] at (current page.north west)
+       {\jakartaextrabold\large Mini Banco};
+  \node[anchor=north west,xshift=4.16cm,yshift=-3.08cm,text=guinda300] at (current page.north west)
+       {\jakartamedium\footnotesize ESCOM \textperiodcentered\ IPN};
+
+  % --- kicker + titulo + descripcion (centro, alineado a la izquierda) ---
+  \node[anchor=west,xshift=2.4cm,yshift=3.0cm,text=guinda300,text width=15cm,align=left]
+       at (current page.west)
+       {\jakartasemibold\footnotesize\addfontfeatures{LetterSpace=16.0}%
+        PROYECTO FINAL \ \textperiodcentered\ \ \MakeUppercase{\unidadAprendizaje}};
+  \node[anchor=west,xshift=2.35cm,yshift=0.7cm,text=white,text width=16cm,align=left]
+       at (current page.west)
+       {\jakartaextrabold\fontsize{36}{42}\selectfont #1};
+  \node[anchor=west,xshift=2.4cm,yshift=-2.6cm,text=guinda200,text width=13.8cm,align=left]
+       at (current page.west)
+       {\jakarta\normalsize #2};
+
+  % --- bloque inferior: equipo + integrantes + profesor/fecha ---
+  \node[anchor=south west,xshift=2.4cm,yshift=2.0cm,text width=15.5cm,align=left]
+       at (current page.south west)
+       {\jakartasemibold\footnotesize\color{guinda300}\addfontfeatures{LetterSpace=16.0}EQUIPO \equipoNum\\[13pt]
+        {\jakartamedium\normalsize\color{white}\integranteUno}\ {\footnotesize\color{guinda300}\grupoUno}\\[4pt]
+        {\jakartamedium\normalsize\color{white}\integranteDos}\ {\footnotesize\color{guinda300}\grupoDos}\\[4pt]
+        {\jakartamedium\normalsize\color{white}\integranteTres}\ {\footnotesize\color{guinda300}\grupoTres}\\[14pt]
+        {\jakartamedium\footnotesize\color{guinda400}\profesorSD\ \textperiodcentered\ \fechaPortada}};
+\end{tikzpicture}
+\end{titlepage}
+\setcounter{page}{2}
+}
+\endinput
