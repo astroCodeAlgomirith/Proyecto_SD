@@ -1,0 +1,177 @@
+\section{Persistencia y recuperacion en Cloud Storage}
+
+El banco mantiene su estado vivo en memoria y en un CSV local, pero ambos
+desaparecen si caen todos los nodos. Para sobrevivir a ese escenario, el lider
+escribe un \emph{log durable} de transacciones en un bucket de Google Cloud
+Storage (GCS): cada transferencia confirmada se persiste como un objeto JSON
+independiente. El componente \codigo{almacen/AlmacenGcs.java} coordina la
+escritura asincrona y la recuperacion, mientras que \codigo{almacen/GcsSubidor.java}
+hace el dialogo real con la API de GCS usando solo el JDK. La activacion ocurre
+en \codigo{server/MainServer.java}, que solo arranca el log en el lider y solo
+si esta definida la variable de entorno \codigo{BANCO\_GCS\_BUCKET}.
+
+\subsection{Escritura asincrona que no bloquea la transferencia}
+
+La regla de diseno es que el camino critico de una transferencia nunca debe
+esperar a la red. Por eso \codigo{AlmacenGcs} usa una cola
+(\codigo{BlockingQueue}) y un unico hilo escritor: cuando el repositorio confirma
+una transaccion, solo la encola con \codigo{registrar()} y sigue; el lider
+permanece como fuente de verdad y el objeto en GCS va detras.
+
+\begin{lstlisting}[language=Java,caption={El registro encola y no bloquea; un hilo daemon vacia la cola}]
+/** Encola una transaccion para persistirla (no bloquea). */
+public void registrar(Transaccion t) {
+    if (activo) cola.offer(t);
+}
+
+public void iniciar(long escritosIniciales) {
+    escritos.set(Math.max(0, escritosIniciales));
+    activo = true;
+    worker = new Thread(this::correr, "gcs-log");
+    worker.setDaemon(true);
+    worker.start();
+}
+\end{lstlisting}
+
+El hilo \codigo{correr()} hace \codigo{poll} con timeout para drenar la cola
+incluso despues de \codigo{detener()}, y cada subida pasa por
+\codigo{subirConReintentos()}, que prueba hasta \codigo{REINTENTOS} (3) veces con
+una espera creciente. Si la subida tiene exito, incrementa el contador
+\codigo{escritos}; si falla tras los reintentos, deja constancia en
+\codigo{stderr} pero no detiene el log.
+
+\begin{lstlisting}[language=Java,caption={Reintentos con respiro creciente ante fallos transitorios de red}]
+private boolean subirConReintentos(Transaccion t) {
+    for (int i = 0; i < REINTENTOS; i++) {
+        try {
+            if (subidor.subir(t)) return true;
+        } catch (Exception e) {
+            // reintentamos con un respiro
+        }
+        try { Thread.sleep(100L * (i + 1)); }
+        catch (InterruptedException e) { return false; }
+    }
+    return false;
+}
+\end{lstlisting}
+
+\begin{nota}
+La subida real se delega en la interfaz \codigo{AlmacenGcs.Subidor}. Esto
+desacopla la logica de cola y reintentos de la red, de modo que las pruebas
+pueden inyectar un subidor falso y verificar el comportamiento sin tocar GCS.
+\end{nota}
+
+\subsection{El subidor real: solo JDK contra la API JSON de GCS}
+
+\codigo{GcsSubidor} implementa \codigo{AlmacenGcs.Subidor} sin la libreria
+cliente de Google: usa el \codigo{HttpClient} del JDK y la API JSON de GCS.
+Como GCS no permite \emph{append}, se escribe un objeto por transaccion en la
+ruta \codigo{transactions/\{seq\}.json}, lo que ademas da un nombre estable e
+idempotente por numero de secuencia.
+
+\begin{lstlisting}[language=Java,caption={Un objeto por transaccion via uploadType=media}]
+@Override
+public boolean subir(Transaccion t) throws Exception {
+    String nombre = URLEncoder.encode("transactions/" + t.seq() + ".json", StandardCharsets.UTF_8);
+    String url = "https://storage.googleapis.com/upload/storage/v1/b/" + bucket
+            + "/o?uploadType=media&name=" + nombre;
+    String cuerpo = Json.toJson(t);
+    HttpRequest req = HttpRequest.newBuilder(URI.create(url))
+            .header("Authorization", "Bearer " + obtenerToken())
+            .header("Content-Type", "application/json")
+            .timeout(Duration.ofSeconds(10))
+            .POST(HttpRequest.BodyPublishers.ofString(cuerpo)).build();
+    int sc = http.send(req, BodyHandlers.discarding()).statusCode();
+    return sc >= 200 && sc < 300;
+}
+\end{lstlisting}
+
+La autenticacion no usa claves de servicio en disco: el metodo
+\codigo{obtenerToken()} pide un token OAuth al \emph{metadata server} de la VM,
+que solo responde si la peticion lleva la cabecera
+\codigo{Metadata-Flavor: Google}. El token se cachea y se renueva 60 segundos
+antes de su expiracion para no pedir uno por cada subida.
+
+\begin{lstlisting}[language=Java,caption={Token OAuth del metadata server, cacheado y renovado antes de expirar}]
+private String obtenerToken() throws Exception {
+    long ahora = System.currentTimeMillis();
+    if (token != null && ahora < tokenVenceMs) return token;
+    HttpRequest req = HttpRequest.newBuilder(URI.create(META_TOKEN))
+            .header("Metadata-Flavor", "Google")
+            .timeout(Duration.ofSeconds(5)).GET().build();
+    JsonObject j = Json.parse(http.send(req, BodyHandlers.ofString()).body());
+    token = j.get("access_token").getAsString();
+    long venceEnS = j.has("expires_in") ? j.get("expires_in").getAsLong() : 3600;
+    tokenVenceMs = ahora + (venceEnS - 60) * 1000L; // renovamos 60s antes
+    return token;
+}
+\end{lstlisting}
+
+El mismo subidor sabe listar y bajar objetos. \codigo{contarExistentes()}
+recorre el bucket con paginacion (\codigo{prefix=transactions/} y
+\codigo{nextPageToken}) y devuelve cuantos objetos hay; \codigo{leerTodas()}
+lista y luego descarga cada objeto, parseando a mano los campos simples
+(\codigo{seq}, \codigo{origenId}, \codigo{destinoId}, \codigo{montoCentavos})
+para reconstruir cada \codigo{Transaccion}.
+
+\subsection{Siembra del contador y recuperacion en frio}
+
+Al arrancar, el lider siembra el contador de transacciones persistidas con el
+numero que devuelve \codigo{recuperar()} (las que ya estaban en el bucket),
+pasandolo a \codigo{iniciar(recuperadas)}, de modo que la metrica continue donde
+se quedo y no reinicie en cero tras un reinicio. El propio \codigo{AlmacenGcs}
+ofrece ademas un \codigo{iniciar()} sin argumentos que cuenta los objetos con
+\codigo{contarExistentes()}, pero el lider no usa ese camino: aprovecha el
+conteo que ya obtuvo la recuperacion.
+
+La recuperacion en frio es el escenario en que fallaron todos los nodos y se
+pierde el estado en memoria. Antes de servir trafico, el lider reaplica el log
+completo sobre el repositorio mediante \codigo{recuperar()}: lee todas las
+transacciones con \codigo{leerTodas()}, las ordena por \codigo{seq} y las
+reaplica en orden con la funcion recibida.
+
+\begin{lstlisting}[language=Java,caption={Reaplicacion ordenada del log durable sobre el repositorio}]
+public long recuperar(Consumer<Transaccion> aplicar) {
+    List<Transaccion> txs;
+    try {
+        txs = new ArrayList<>(subidor.leerTodas());
+    } catch (Exception e) {
+        System.err.println("GCS: no se pudo leer el log para recuperar: " + e);
+        return 0;
+    }
+    txs.sort(Comparator.comparingLong(Transaccion::seq));
+    for (Transaccion t : txs) aplicar.accept(t);
+    return txs.size();
+}
+\end{lstlisting}
+
+El cableado vive en \codigo{MainServer.iniciarAlmacenGcs()}: primero reaplica el
+log (\codigo{repo::aplicarReplica}), luego arranca el worker con el numero de
+transacciones recuperadas y, por ultimo, engancha el observador para los nuevos
+commits. La funcion \codigo{aplicarReplica} reaplica sin revalidar saldos ni
+reescribir en GCS, de modo que la recuperacion no genera un ciclo de subidas.
+
+\begin{lstlisting}[language=Java,caption={Recuperacion antes de servir y enganche del observador (MainServer)}]
+long recuperadas = almacen.recuperar(repo::aplicarReplica);
+// ...
+almacen.iniciar(recuperadas);
+repo.setObservador(almacen::registrar);
+repo.setConteoStorage(almacen::escritos);
+\end{lstlisting}
+
+\begin{advertencia}
+La recuperacion reaplica sobre el estado de las cuentas del CSV. Las cuentas
+creadas via \codigo{/api/register} que no esten en el CSV no se recuperan; la
+prueba del proyecto usa las cuentas del dataset.
+\end{advertencia}
+
+\subsection{Exposicion de la metrica en el dashboard}
+
+El conteo de transacciones persistidas se publica para el panel a traves del
+repositorio. \codigo{MainServer} conecta \codigo{repo.setConteoStorage(almacen::escritos)},
+y \codigo{data/CuentaRepository.java} expone el valor con
+\codigo{txEnStorage()}, que devuelve \codigo{-1} cuando el log GCS esta
+deshabilitado. \codigo{server/StatsHandler.java} lo incluye en el JSON de
+estadisticas bajo la clave \codigo{txEnStorage}, de manera que el dashboard
+muestra en tiempo real cuantas transacciones ya quedaron durables en Cloud
+Storage frente a las que aun estan pendientes en la cola.

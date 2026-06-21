@@ -1,0 +1,147 @@
+\section{Replicacion y tolerancia a fallos}
+
+El banco replica su estado desde un nodo \emph{lider} hacia uno o varios nodos
+\emph{replica} mediante un log de transacciones ordenado por numero de
+secuencia y un transporte TCP directo lider a replica (no se usa Pub/Sub). El
+lider acepta conexiones de replica, las pone al dia (\emph{catch-up}) desde la
+secuencia que cada una reporta y despues les empuja en vivo cada transaccion
+nueva. Si una replica se cae y vuelve, reanuda exactamente donde se quedo: si
+proceso hasta la secuencia 4500, al reconectar pide y recibe la 4501 en
+adelante. Asi, apagar y encender replicas no pierde ni duplica transacciones.
+
+\subsection{Log por numero de secuencia}
+
+La pieza central es \codigo{com/escom/banco/data/RegistroTransacciones.java}, un
+log de transacciones indexado por su numero de secuencia. Cada
+\codigo{com/escom/banco/model/Transaccion.java} es un \codigo{record} con
+\codigo{seq}, \codigo{origenId}, \codigo{destinoId} y \codigo{montoCentavos}; el
+campo \codigo{seq} fija un orden total. El log se respalda en un
+\codigo{ConcurrentSkipListMap}, que mantiene las entradas ordenadas por clave
+aunque varios hilos agreguen transacciones de forma concurrente.
+
+\begin{lstlisting}[language=Java,caption={RegistroTransacciones: append y lectura ordenada}]
+private final ConcurrentSkipListMap<Long, Transaccion> log = new ConcurrentSkipListMap<>();
+
+public void agregar(Transaccion t) {
+    log.put(t.seq(), t);
+}
+
+/** Transacciones con seq estrictamente mayor a la dada, en orden de seq. */
+public List<Transaccion> desde(long seq) {
+    return new ArrayList<>(log.tailMap(seq, false).values());
+}
+\end{lstlisting}
+
+El metodo \codigo{desde(N)} devuelve todas las transacciones con secuencia
+estrictamente mayor a \codigo{N}, ya ordenadas. Esta operacion es la base tanto
+del catch-up de una replica que se reincorpora como del streaming en vivo: en
+ambos casos el orden lo garantiza el log, no el instante en que se hizo el
+\codigo{agregar}.
+
+\subsection{El lider: catch-up y streaming TCP}
+
+El lado lider es \codigo{com/escom/banco/replicacion/ServidorReplicacion.java}.
+Abre un \codigo{ServerSocket} en un hilo \emph{daemon} de aceptacion y, por cada
+replica que se conecta, lanza un hilo que la atiende. El protocolo de saludo es
+una sola linea \codigo{RESUME N}: la replica declara la ultima secuencia que ya
+tiene aplicada, y a partir de ahi el lider le envia todo lo que falta y luego lo
+nuevo, sirviendose siempre de \codigo{repo.registro().desde(enviado)}.
+
+\begin{lstlisting}[language=Java,caption={ServidorReplicacion: catch-up desde N+1 y streaming en vivo}]
+long enviado = leerResume(in.readLine());   // "RESUME N"
+while (activo && !sock.isClosed()) {
+    List<Transaccion> nuevas = repo.registro().desde(enviado);
+    if (nuevas.isEmpty()) {
+        Thread.sleep(1);
+        continue;
+    }
+    for (Transaccion tx : nuevas) {
+        out.write(CodecTransaccion.aLinea(tx));
+        out.write("\n");
+        enviado = tx.seq();
+    }
+    out.flush();
+}
+\end{lstlisting}
+
+Tras el catch-up (todo lo posterior a \codigo{N}), el mismo bucle convierte el
+envio en streaming continuo: cuando no hay nada nuevo duerme un milisegundo y
+reintenta; cuando aparecen transacciones recien agregadas al log, las empuja en
+orden y avanza el cursor \codigo{enviado} a la ultima \codigo{seq} servida. El
+parseo del saludo lo hace \codigo{leerResume}, que ante una linea ausente o mal
+formada degrada a \codigo{0} (la replica recibe el log completo).
+
+\begin{nota}
+El lider no recuerda por replica cuanto le envio: el cursor \codigo{enviado}
+vive en el hilo de esa conexion y se reconstruye en cada reconexion a partir del
+\codigo{RESUME N} que manda la replica. El estado de avance lo posee la replica.
+\end{nota}
+
+\subsection{La replica: aplicar y reconectar}
+
+El lado replica es \codigo{com/escom/banco/replicacion/ClienteReplicacion.java}.
+Corre en su propio hilo daemon: se conecta al lider, envia
+\codigo{RESUME} con \codigo{repo.secuenciaActual()} y luego lee linea por linea,
+aplicando cada transaccion con \codigo{repo.aplicarReplica(...)}. Si la conexion
+se cae, el bucle externo reintenta tras una breve espera y reanuda desde la
+secuencia actual de la replica.
+
+\begin{lstlisting}[language=Java,caption={ClienteReplicacion: RESUME, aplicar en vivo y reconexion}]
+try (Socket s = new Socket(hostLider, puerto);
+     /* ...streams UTF-8... */ ) {
+
+    out.write("RESUME " + repo.secuenciaActual() + "\n");
+    out.flush();
+
+    String linea;
+    while (activo && (linea = in.readLine()) != null) {
+        repo.aplicarReplica(CodecTransaccion.deLinea(linea));
+    }
+} catch (IOException e) {
+    // lider no disponible: se reintenta abajo
+}
+if (!activo) return;
+try { Thread.sleep(500); } catch (InterruptedException e) { return; }
+\end{lstlisting}
+
+La serializacion en el cable es responsabilidad de
+\codigo{com/escom/banco/replicacion/CodecTransaccion.java}, que codifica cada
+transaccion como una linea ASCII de cuatro campos separados por comas
+(\codigo{seq,origenId,destinoId,montoCentavos}) con \codigo{aLinea} y la
+reconstruye con \codigo{deLinea}. Al aplicar, \codigo{aplicarReplica} mueve el
+monto entre cuentas, agrega la transaccion al log local y avanza la secuencia a
+\codigo{t.seq()}, de modo que el siguiente \codigo{RESUME} refleje el avance.
+
+\subsection{Rol por entorno y resincronizacion ante fallos}
+
+El rol de cada nodo se decide por variables de entorno en
+\codigo{com/escom/banco/server/MainServer.java}: sin \codigo{BANCO\_LIDER\_HOST}
+el nodo es LIDER y levanta el \codigo{ServidorReplicacion}; con
+\codigo{BANCO\_LIDER\_HOST} es REPLICA y arranca el \codigo{ClienteReplicacion}
+apuntando a ese host. El puerto de replicacion sale de
+\codigo{BANCO\_REPLICACION\_PUERTO} (por omision \codigo{9090}).
+
+\begin{lstlisting}[language=Java,caption={MainServer: seleccion de rol por entorno}]
+if (esLider()) {
+    new ServidorReplicacion(CuentaRepository.get(), puertoRepl).iniciar();
+    System.out.println("Rol: LIDER - replicacion TCP en puerto " + puertoRepl);
+} else {
+    String liderHost = System.getenv("BANCO_LIDER_HOST");
+    new ClienteReplicacion(CuentaRepository.get(), liderHost, puertoRepl).iniciar();
+    System.out.println("Rol: REPLICA - siguiendo a " + liderHost + ":" + puertoRepl);
+}
+\end{lstlisting}
+
+La tolerancia a fallos emerge de combinar las tres piezas anteriores. Si se
+apaga una replica, el lider solo ve cerrarse su socket y el hilo que la atendia
+termina; el resto del sistema sigue. Cuando esa replica se enciende de nuevo,
+reconecta, manda \codigo{RESUME 4500} y el lider responde con la secuencia 4501
+en adelante (catch-up) antes de retomar el streaming en vivo. Como el avance se
+deriva siempre del numero de secuencia, no hay huecos ni duplicados.
+
+\begin{advertencia}
+La resincronizacion confia en que la secuencia de la replica nunca supere a la
+del lider. \codigo{aplicarReplica} es para transacciones ya validadas por el
+lider: una replica nunca origina transacciones propias, solo las aplica en el
+orden recibido.
+\end{advertencia}

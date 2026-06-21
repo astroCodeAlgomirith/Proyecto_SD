@@ -1,37 +1,77 @@
 % ============================================================================
-%  caratula.sty  -  Portada reutilizable del Proyecto Final de Sistemas
-%  Distribuidos (ESCOM-IPN, Equipo 17). Lenguaje visual inspirado en el
-%  sistema de diseno glab-esimez (guinda + Plus Jakarta Sans, blobs de luz).
-%  Compilar con LUALATEX o XELATEX (las fuentes viven en fonts/).
+%  caratula.sty - Sistema de diseno de los documentos del Proyecto Final SD
+%  (ESCOM-IPN, Equipo 17). Portada + tema completo (encabezados, secciones,
+%  cajas, codigo, tablas) inspirado en glab-esimez. Guinda + Plus Jakarta Sans.
+%  Compilar con LUALATEX o XELATEX (fuentes en fonts/).
 %
-%  Uso:
+%  Uso minimo:
+%      \documentclass[11pt]{article}
 %      \usepackage{caratula}
-%      \portada{Documentación de\\Arquitectura}{Descripción corta del documento.}
-%
-%  Los datos del equipo viven UNA sola vez aqui abajo (fuente de verdad).
+%      \definirTitulo{Manual técnico}
+%      \begin{document}
+%      \portada{Manual\\técnico}{Descripción corta.}
+%      \indiceglab
+%      \input{manual-tecnico/01-arquitectura}
+%      \end{document}
 % ============================================================================
 \NeedsTeXFormat{LaTeX2e}
-\ProvidesPackage{caratula}[2026/06/21 Portada Proyecto Final SD (estilo glab)]
+\ProvidesPackage{caratula}[2026/06/21 Sistema de diseno Proyecto Final SD]
 
+% ----------------------------------------------------------------- base
+\RequirePackage[letterpaper,top=2.6cm,bottom=2.6cm,left=2.4cm,right=2.4cm,
+                headheight=28pt,headsep=18pt,footskip=32pt]{geometry}
+\RequirePackage[spanish,es-noshorthands,es-noindentfirst,es-tabla]{babel}
 \RequirePackage{fontspec}
 \RequirePackage[table]{xcolor}
-\RequirePackage{tikz}
+\RequirePackage{graphicx}
+\RequirePackage{booktabs}
+\RequirePackage{array}
+\RequirePackage{tabularx}
+\RequirePackage{enumitem}
+\RequirePackage{parskip}
 \RequirePackage{microtype}
+\RequirePackage{fancyhdr}
+\RequirePackage{titlesec}
+\RequirePackage{lastpage}
+\RequirePackage{caption}
+\RequirePackage{listings}
+\RequirePackage[most]{tcolorbox}
+\RequirePackage{tikz}
+\setlength{\emergencystretch}{2.5em}
 
-% ------------------------------ escala guinda (IPN, Pantone 222C) -----------
+% ----------------------------------------------------------------- color
+\definecolor{guinda50}{HTML}{FBF6F9}
 \definecolor{guinda100}{HTML}{F6EAF1}
 \definecolor{guinda200}{HTML}{EBD2E0}
 \definecolor{guinda300}{HTML}{DAAEC6}
 \definecolor{guinda400}{HTML}{C17EA4}
 \definecolor{guinda500}{HTML}{A35480}
-\definecolor{guinda}{HTML}{6F1D46}      % guinda-700
+\definecolor{guinda}{HTML}{6F1D46}      % guinda-700, Pantone 222C
 \definecolor{guinda800}{HTML}{5C1839}
 \definecolor{guinda900}{HTML}{4A132E}
 \definecolor{guinda950}{HTML}{2E0A1C}
+\definecolor{stone50}{HTML}{FAFAF9}
+\definecolor{stone100}{HTML}{F5F5F4}
+\definecolor{stone200}{HTML}{E7E5E4}
+\definecolor{stone300}{HTML}{D6D3D1}
+\definecolor{stone500}{HTML}{78716C}
+\definecolor{stone600}{HTML}{57534E}
+\definecolor{stone800}{HTML}{292524}
+\definecolor{stone900}{HTML}{1C1917}
+\definecolor{ambar}{HTML}{B45309}
+\definecolor{esmeralda}{HTML}{047857}
+\definecolor{rojo}{HTML}{B91C1C}
 
-% ------------------------------ fuentes -------------------------------------
+% ----------------------------------------------------------------- fuentes
 \providecommand{\caratulafontpath}{fonts/}
 \defaultfontfeatures{Ligatures=TeX}
+\setmainfont{PlusJakartaSans}[
+    Path=\caratulafontpath, Extension=.ttf,
+    UprightFont=*-Regular, ItalicFont=*-Italic,
+    BoldFont=*-Bold, BoldItalicFont=*-BoldItalic]
+\setmonofont{JetBrainsMono}[
+    Path=\caratulafontpath, Extension=.ttf,
+    UprightFont=*-Regular, BoldFont=*-Bold, Scale=0.86]
 \newfontfamily\jakarta{PlusJakartaSans-Regular}[Path=\caratulafontpath,Extension=.ttf]
 \newfontfamily\jakartamedium{PlusJakartaSans-Medium}[Path=\caratulafontpath,Extension=.ttf]
 \newfontfamily\jakartasemibold{PlusJakartaSans-SemiBold}[Path=\caratulafontpath,Extension=.ttf]
@@ -46,38 +86,113 @@
 \def\integranteDos{Vania Ivonne Arévalo del Ángel}    \def\grupoDos{7CM4}
 \def\integranteTres{Miriam Guadalupe Ramírez Sánchez} \def\grupoTres{7CM2}
 
-% ------------------------- logo: fachada de banco en mosaico ----------------
+% ----------------------------------------------------------------- titulos
+\titleformat{\section}
+    {\jakartaextrabold\Large\color{guinda950}}
+    {\llap{\colorbox{guinda}{\color{white}\jakartaextrabold\normalsize~\thesection~}\hspace{0.6em}}}
+    {0pt}{}
+\titlespacing*{\section}{0pt}{2.1em}{0.8em}
+\titleformat{\subsection}
+    {\jakartasemibold\large\color{guinda900}}
+    {\textcolor{guinda400}{\thesubsection}}{0.6em}{}
+\titlespacing*{\subsection}{0pt}{1.5em}{0.5em}
+\titleformat{\subsubsection}
+    {\jakartasemibold\normalsize\color{stone800}}
+    {\textcolor{guinda400}{\thesubsubsection}}{0.6em}{}
+
+% ----------------------------------------------------------------- header/footer
+\newcommand{\docTitle}{}
+\newcommand{\definirTitulo}[1]{\renewcommand{\docTitle}{#1}}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{{\jakartasemibold\footnotesize\color{guinda}Banco SD}%
+    {\jakartamedium\footnotesize\color{stone500}\ \textperiodcentered\ ESCOM Zacatenco}}
+\fancyhead[R]{\jakartamedium\footnotesize\color{stone500}\docTitle}
+\renewcommand{\headrule}{\color{guinda200}\hrule width\headwidth height 0.6pt}
+\fancyfoot[L]{\jakartamedium\footnotesize\color{stone500}Instituto Polit\'ecnico Nacional}
+\fancyfoot[R]{\jakartamedium\footnotesize\color{stone500}%
+    P\'agina {\ttfamily\thepage} de {\ttfamily\pageref{LastPage}}}
+
+% ----------------------------------------------------------------- enlaces
+\RequirePackage[colorlinks=true,linkcolor=guinda,urlcolor=guinda600,
+                citecolor=guinda]{hyperref}
+
+% ----------------------------------------------------------------- listas/tablas
+\setlist{itemsep=2pt,topsep=4pt,parsep=0pt}
+\setlist[itemize,1]{label=\textcolor{guinda400}{\small\textbullet}}
+\renewcommand{\arraystretch}{1.35}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}m{#1}}
+\newcolumntype{C}[1]{>{\centering\arraybackslash}m{#1}}
+\newcolumntype{R}[1]{>{\raggedleft\arraybackslash}m{#1}}
+\captionsetup{font={small,color=stone600},labelfont={color=guinda}}
+\newcommand{\thead}[1]{{\jakartasemibold\small\color{guinda950}#1}}
+\newenvironment{tablaglab}[1]
+    {\par\addvspace{1em}\centering\small\begin{tabular}{#1}\toprule}
+    {\bottomrule\end{tabular}\par\addvspace{1em}}
+
+% ----------------------------------------------------------------- codigo
+\lstdefinestyle{glab}{
+    basicstyle=\ttfamily\small\color{stone800},
+    backgroundcolor=\color{stone50},
+    frame=single, rulecolor=\color{stone200}, framerule=0.6pt,
+    framesep=8pt, xleftmargin=10pt, xrightmargin=10pt,
+    breaklines=true, breakatwhitespace=true,
+    postbreak=\mbox{\textcolor{guinda400}{$\hookrightarrow$}\space},
+    showstringspaces=false, tabsize=4, columns=fullflexible, keepspaces=true,
+    keywordstyle=\color{guinda}\bfseries,
+    commentstyle=\color{stone500}\itshape,
+    stringstyle=\color{esmeralda},
+    aboveskip=1em, belowskip=1em,
+    literate={á}{{\'a}}1 {é}{{\'e}}1 {í}{{\'i}}1 {ó}{{\'o}}1 {ú}{{\'u}}1
+             {ñ}{{\~n}}1 {Á}{{\'A}}1 {É}{{\'E}}1 {Í}{{\'I}}1 {Ó}{{\'O}}1
+             {Ú}{{\'U}}1 {Ñ}{{\~N}}1 {¿}{{?`}}1 {¡}{{!`}}1,
+}
+\lstset{style=glab}
+\lstdefinelanguage{none}{keywords={}}
+\newcommand{\codigo}[1]{{\setlength{\fboxsep}{1.5pt}%
+    \colorbox{stone100}{\ttfamily\small #1}}}
+
+% ----------------------------------------------------------------- cajas
+\newtcolorbox{nota}{enhanced,breakable,colback=guinda50,colframe=guinda50,
+    borderline west={2.5pt}{0pt}{guinda},arc=2.5mm,left=10pt,right=10pt,top=8pt,bottom=8pt,
+    title={\jakartasemibold\small\textcolor{guinda}{NOTA}},coltitle=guinda,
+    attach title to upper={\par\vspace{2pt}},fonttitle=\small}
+\newtcolorbox{advertencia}{enhanced,breakable,colback=ambar!6!white,colframe=ambar!6!white,
+    borderline west={2.5pt}{0pt}{ambar},arc=2.5mm,left=10pt,right=10pt,top=8pt,bottom=8pt,
+    title={\jakartasemibold\small\textcolor{ambar}{IMPORTANTE}},coltitle=ambar,
+    attach title to upper={\par\vspace{2pt}},fonttitle=\small}
+\newtcolorbox{consejo}{enhanced,breakable,colback=esmeralda!6!white,colframe=esmeralda!6!white,
+    borderline west={2.5pt}{0pt}{esmeralda},arc=2.5mm,left=10pt,right=10pt,top=8pt,bottom=8pt,
+    title={\jakartasemibold\small\textcolor{esmeralda}{CONSEJO}},coltitle=esmeralda,
+    attach title to upper={\par\vspace{2pt}},fonttitle=\small}
+
+% ----------------------------------------------------------------- logo banco
 \newcommand{\bancologo}[1][1]{%
   \begin{tikzpicture}[scale=#1,line cap=round,line join=round]
     \fill[guinda,rounded corners=3.2pt] (0,0) rectangle (1.2,1.2);
     \begin{scope}[shift={(0.6,0.6)},white,line width=1.25pt]
-      \draw[fill=white,draw=white] (-0.34,0.14)--(0,0.36)--(0.34,0.14)--cycle; % fronton
-      \draw (-0.30,0.07)--(0.30,0.07);                                          % arquitrabe
-      \foreach \x in {-0.24,-0.08,0.08,0.24} \draw (\x,0.04)--(\x,-0.22);       % columnas
-      \draw (-0.34,-0.27)--(0.34,-0.27);                                        % base
+      \draw[fill=white,draw=white] (-0.34,0.14)--(0,0.36)--(0.34,0.14)--cycle;
+      \draw (-0.30,0.07)--(0.30,0.07);
+      \foreach \x in {-0.24,-0.08,0.08,0.24} \draw (\x,0.04)--(\x,-0.22);
+      \draw (-0.34,-0.27)--(0.34,-0.27);
     \end{scope}
   \end{tikzpicture}}
 
-% =============================== \portada ===================================
+% ----------------------------------------------------------------- portada
 % #1 = titulo del documento (admite \\)   #2 = descripcion corta
 \newcommand{\portada}[2]{%
 \begin{titlepage}
 \thispagestyle{empty}
 \begin{tikzpicture}[remember picture,overlay]
-  % fondo + blobs de luz
   \fill[guinda950] (current page.south west) rectangle (current page.north east);
   \fill[guinda900,opacity=0.55] ([xshift=-4cm,yshift=5cm]current page.east) circle (7cm);
   \fill[guinda,opacity=0.32]   ([xshift=3cm,yshift=-3cm]current page.north west) circle (6cm);
   \fill[guinda800,opacity=0.30] ([xshift=2cm,yshift=4cm]current page.south east) circle (5.5cm);
-
-  % --- marca arriba a la izquierda ---
   \node[anchor=north west,xshift=2.4cm,yshift=-2.3cm] at (current page.north west) {\bancologo[1.05]};
   \node[anchor=north west,xshift=4.15cm,yshift=-2.52cm,text=white] at (current page.north west)
        {\jakartaextrabold\large Mini Banco};
   \node[anchor=north west,xshift=4.16cm,yshift=-3.08cm,text=guinda300] at (current page.north west)
        {\jakartamedium\footnotesize ESCOM \textperiodcentered\ IPN};
-
-  % --- kicker + titulo + descripcion (centro, alineado a la izquierda) ---
   \node[anchor=west,xshift=2.4cm,yshift=3.0cm,text=guinda300,text width=15cm,align=left]
        at (current page.west)
        {\jakartasemibold\footnotesize\addfontfeatures{LetterSpace=16.0}%
@@ -88,8 +203,6 @@
   \node[anchor=west,xshift=2.4cm,yshift=-2.6cm,text=guinda200,text width=13.8cm,align=left]
        at (current page.west)
        {\jakarta\normalsize #2};
-
-  % --- bloque inferior: equipo + integrantes + profesor/fecha ---
   \node[anchor=south west,xshift=2.4cm,yshift=2.0cm,text width=15.5cm,align=left]
        at (current page.south west)
        {\jakartasemibold\footnotesize\color{guinda300}\addfontfeatures{LetterSpace=16.0}EQUIPO \equipoNum\\[13pt]
@@ -101,4 +214,14 @@
 \end{titlepage}
 \setcounter{page}{2}
 }
+
+% ----------------------------------------------------------------- indice
+\newcommand{\indiceglab}{{\hypersetup{linkcolor=stone800}\tableofcontents}\clearpage}
+
+% ----------------------------------------------------------------- figuras
+\graphicspath{{figuras/}{diagramas/}}
+\newcommand{\figura}[3][0.9]{%
+  \begin{figure}[ht!]\centering
+    \includegraphics[width=#1\textwidth]{#2}\caption{#3}
+  \end{figure}}
 \endinput
