@@ -1,0 +1,251 @@
+\section{Servidor HTTP sobre NIO}
+
+El banco no usa \codigo{com.sun.net.httpserver}: implementa su propio servidor
+HTTP/1.1 sobre \codigo{java.nio}, con cero dependencias externas. El nucleo es un
+modelo \emph{multi-reactor}: varios hilos, cada uno con un \codigo{Selector} y un
+\codigo{ServerSocketChannel} propios, multiplexan miles de conexiones sin un hilo
+por socket. El camino caliente (consultas y operaciones del banco) se atiende y se
+escribe sin salir del hilo del reactor; solo las rutas que bloquean (bcrypt en
+login/registro, llamadas a peers en el panel) se descargan a un pool worker. La
+capa HTTP la forman un parser sin estado y un puñado de objetos inmutables.
+
+\subsection{Arquitectura multi-reactor}
+
+La clase \codigo{server/nio/ServidorNio.java} orquesta el arranque. Su
+constructor recibe el puerto, el \codigo{Ruteador}, el numero de reactores y el
+tamano del pool worker; ambos numeros son configurables y se fuerzan a un minimo
+de uno. El metodo \codigo{iniciar()} es idempotente y \codigo{synchronized}: crea
+el pool de hilos daemon, instancia los reactores y decide como repartir las
+conexiones segun haya o no soporte de \codigo{SO\_REUSEPORT}.
+
+Hay tres ramas de \emph{bind}. Con un solo reactor, un unico
+\codigo{ServerSocketChannel} se registra en ese reactor. Con varios reactores y
+\codigo{SO\_REUSEPORT} disponible, cada reactor abre su propio socket en el mismo
+puerto y es el kernel quien reparte las conexiones entrantes. Si no hay
+\codigo{SO\_REUSEPORT}, un unico acceptor acepta y reparte los canales
+round-robin entre todos los reactores, incluido el propio acceptor
+(\codigo{reactores[0].conAcceptor(s, reactores)} pasa el arreglo completo
+como destinos del reparto).
+
+\begin{lstlisting}[language=Java,caption={Tres modos de reparto en ServidorNio.iniciar()}]
+boolean reuseport = numReactores > 1 && soportaReuseport();
+if (numReactores == 1) {
+    ServerSocketChannel s = abrir(puerto, false);
+    reactores[0].conAcceptor(s, null);
+} else if (reuseport) {
+    for (int i = 0; i < numReactores; i++) {
+        ServerSocketChannel si = abrir(puerto, true);
+        reactores[i].conAcceptor(si, null);
+    }
+} else {
+    ServerSocketChannel s = abrir(puerto, false);
+    reactores[0].conAcceptor(s, reactores); // acceptor unico round-robin
+}
+\end{lstlisting}
+
+El metodo \codigo{abrir()} configura el socket en modo no bloqueante, activa
+\codigo{SO\_REUSEADDR}, agrega \codigo{SO\_REUSEPORT} cuando corresponde y hace
+\emph{bind} con un \emph{backlog} de 1024. La deteccion de \codigo{SO\_REUSEPORT}
+es defensiva: \codigo{soportaReuseport()} consulta
+\codigo{supportedOptions()} de un canal de prueba, porque esa opcion no existe en
+todos los sistemas operativos.
+
+\begin{lstlisting}[language=Java,caption={Apertura no bloqueante del ServerSocketChannel}]
+ServerSocketChannel s = ServerSocketChannel.open();
+s.configureBlocking(false);
+s.setOption(StandardSocketOptions.SO_REUSEADDR, true);
+if (reuseport) s.setOption(StandardSocketOptions.SO_REUSEPORT, true);
+s.bind(new InetSocketAddress(puerto), BACKLOG);
+\end{lstlisting}
+
+\begin{nota}
+Cada reactor corre en un hilo daemon nombrado \codigo{banco-reactor-i}; el pool
+worker usa hilos \codigo{banco-worker-n}. Tanto \codigo{detener()} como el rollback
+\codigo{limpiarParcial()} cierran selectores, sockets y el pool de forma ordenada.
+\end{nota}
+
+\subsection{El bucle del reactor}
+
+La clase \codigo{server/nio/Reactor.java} es el corazon del servidor: un hilo, un
+\codigo{Selector} y un bucle estilo \emph{epoll}. En cada vuelta primero registra
+los canales nuevos que pudo haberle pasado el acceptor (cola \codigo{nuevos}),
+luego drena la cola de escrituras pendientes encoladas por los workers
+(\codigo{pendientesEscritura}) y solo entonces hace \codigo{select()} para atender
+los eventos \codigo{OP\_ACCEPT}, \codigo{OP\_READ} y \codigo{OP\_WRITE}.
+
+\begin{lstlisting}[language=Java,caption={Bucle principal del Reactor}]
+while (activo) {
+    SocketChannel ch;
+    while ((ch = nuevos.poll()) != null) registrarCanal(ch);
+    SelectionKey wk;
+    while ((wk = pendientesEscritura.poll()) != null) {
+        if (wk.isValid()) flush(wk);
+    }
+    selector.select();
+    Iterator<SelectionKey> it = selector.selectedKeys().iterator();
+    while (it.hasNext()) {
+        SelectionKey key = it.next();
+        it.remove();
+        if (key.isAcceptable()) { if (activo) aceptar(); }
+        else if (key.isReadable()) leer(key);
+        else if (key.isWritable()) flush(key);
+    }
+}
+\end{lstlisting}
+
+\begin{advertencia}
+La INVARIANTE central del diseno: \textbf{solo el hilo del reactor toca el
+\codigo{SocketChannel} y \codigo{key.interestOps()}}. Los workers nunca escriben
+al canal; unicamente encolan bytes en la \codigo{Conexion} y la \emph{key} en
+\codigo{pendientesEscritura}, y despiertan al selector. Romper esta invariante
+introduciria carreras imposibles de depurar sobre el estado del socket.
+\end{advertencia}
+
+El estado por conexion vive en \codigo{server/nio/Conexion.java}, que se adjunta
+como \emph{attachment} de la \codigo{SelectionKey}. Contiene un buffer de lectura
+acumulativo (\codigo{buf}, \codigo{len}) que crece por duplicacion hasta un tope,
+y una cola de salida \codigo{salida} de \codigo{ByteBuffer}. La cola es
+\codigo{ConcurrentLinkedQueue} precisamente porque un worker puede depositar la
+respuesta desde otro hilo, pero la escritura al canal sigue siendo exclusiva del
+reactor.
+
+Al aceptar, \codigo{registrarCanal()} pone el canal en no bloqueante, activa
+\codigo{TCP\_NODELAY} y lo registra para \codigo{OP\_READ} con una
+\codigo{Conexion} nueva. La lectura (\codigo{leer()}) asegura espacio, lee del
+canal al buffer, despacha con \codigo{procesar()} y vacia con \codigo{flush()}. El
+\codigo{flush()} aplica \emph{back-pressure}: si un \codigo{ByteBuffer} no se
+escribio completo, registra interes en escritura y espera; cuando termina de
+vaciar vuelve a \codigo{OP\_READ} y, si quedan bytes en el buffer, reanuda el
+parseo (clave para keep-alive y pipelining).
+
+\begin{lstlisting}[language=Java,caption={flush con back-pressure y reanudacion del parseo}]
+while ((bb = cx.salida.peek()) != null) {
+    ch.write(bb);
+    if (bb.hasRemaining()) {
+        key.interestOps(SelectionKey.OP_READ | SelectionKey.OP_WRITE);
+        return;
+    }
+    cx.salida.poll();
+}
+if (cx.cerrarTrasFlush) { cerrar(key); return; }
+key.interestOps(SelectionKey.OP_READ);
+if (cx.len > 0 && !cx.esperandoWorker) {
+    procesar(key, cx);
+    if (!cx.salida.isEmpty()) continue;
+}
+\end{lstlisting}
+
+\subsection{Camino caliente e \emph{inline} contra worker}
+
+El metodo \codigo{procesar()} parsea y despacha todas las peticiones completas
+que haya en el buffer. Resuelve la ruta con el \codigo{Ruteador} y bifurca segun
+como este marcada. Una ruta \codigo{INLINE} (camino caliente: consultar cuentas,
+transferir, estadisticas, pagina) se ejecuta y se serializa en el mismo hilo del
+reactor, y el bucle sigue drenando posibles peticiones pipelined. Una ruta
+\codigo{WORKER} marca \codigo{esperandoWorker} y hace \codigo{return}: deja de
+parsear hasta que llegue la respuesta, porque estas peticiones no se pipelinean.
+
+\begin{lstlisting}[language=Java,caption={Bifurcacion inline vs worker en procesar()}]
+if (ruta.worker) {
+    cx.esperandoWorker = true;
+    despacharWorker(key, cx, ruta.manejador, sol, cerrar);
+    return; // no parseamos mas hasta responder
+}
+Respuesta resp = ejecutar(ruta.manejador, sol);
+boolean cerrarFinal = cerrar || resp.cerrar;
+cx.encolar(Conexion.serializar(resp, cerrarFinal));
+if (cerrarFinal) { cx.cerrarTrasFlush = true; return; }
+\end{lstlisting}
+
+El retorno de un worker usa \textbf{dos} estructuras concurrentes, no una. El
+worker ejecuta el handler, serializa la respuesta y la encola en
+\codigo{Conexion.salida}; ademas marca la \emph{key} en la cola
+\codigo{pendientesEscritura} del reactor y dispara \codigo{selector.wakeup()}
+mediante \codigo{marcarPendiente()}. Asi el reactor, al volver del
+\codigo{select()}, encuentra la \emph{key} pendiente y hace el \codigo{flush()};
+nunca es el worker quien escribe al socket.
+
+\begin{lstlisting}[language=Java,caption={despacharWorker: el worker solo encola y despierta}]
+pool.execute(() -> {
+    Respuesta resp = ejecutar(m, sol);
+    boolean cerrarFinal = cerrar || resp.cerrar;
+    cx.encolar(Conexion.serializar(resp, cerrarFinal));
+    if (cerrarFinal) cx.cerrarTrasFlush = true;
+    cx.esperandoWorker = false;
+    marcarPendiente(key); // encola la key + selector.wakeup()
+});
+\end{lstlisting}
+
+\begin{consejo}
+La distincion inline contra worker la decide el \codigo{Ruteador} al registrar,
+no el handler. Mantener los handlers triviales en el reactor evita el coste de un
+\emph{handoff} de hilo por cada peticion; reservar el pool para lo que de verdad
+bloquea (bcrypt, E/S de red) protege a los reactores de quedarse atascados.
+\end{consejo}
+
+\subsection{Capa HTTP/1.1: parser, modelo y ruteo}
+
+El parser \codigo{server/http/ParserHttp.java} es \textbf{sin estado}: cada
+intento re-escanea el rango \codigo{[0,len)} del buffer y devuelve un
+\codigo{Resultado} con estado \codigo{LISTA} (con la \codigo{Solicitud} y cuantos
+bytes consumir), \codigo{INCOMPLETA} (faltan datos) o \codigo{ERROR}. Busca el fin
+de cabeceras (CRLFCRLF o LFLF), interpreta la \emph{request-line}, normaliza las
+cabeceras a minusculas (gana la primera en duplicados) y respeta el
+\codigo{Content-Length}. Aplica limites de tamano: si las cabeceras superan
+\codigo{MAX\_HEADERS} responde 431, y un \codigo{Content-Length} mayor que
+\codigo{MAX\_CUERPO} es 400.
+
+\begin{lstlisting}[language=Java,caption={Decision keep-alive del parser (Content-Length y Connection)}]
+boolean expectContinue = "100-continue".equalsIgnoreCase(headers.get("expect"));
+int disponibles = len - bodyStart;
+if (disponibles < cl) return Resultado.incompleta(expectContinue);
+// ...
+String conn = headers.get("connection");
+boolean pideCerrar = (conn != null && conn.toLowerCase().contains("close"))
+        || (http10 && (conn == null || !conn.toLowerCase().contains("keep-alive")));
+\end{lstlisting}
+
+El parser tambien sostiene keep-alive y pipelining: indica con
+\codigo{bytesConsumidos} cuanto compactar para que el resto del buffer sea el
+inicio de la siguiente peticion, y emite \codigo{100 Continue} cuando una
+peticion incompleta trae \codigo{Expect: 100-continue}. Antes de rutear,
+\codigo{normalizarPath()} quita esquema, autoridad, \emph{query} y \emph{fragment}
+del \emph{request-target}, dejando solo el path limpio.
+
+El modelo de datos es inmutable. \codigo{server/http/Solicitud.java} expone
+\codigo{metodo()}, \codigo{path()}, un \codigo{header()} insensible a
+mayusculas y el cuerpo en bytes o texto. \codigo{server/http/Respuesta.java}
+ofrece fabricas \codigo{json()}, \codigo{html()}, \codigo{sinCuerpo()} y
+\codigo{error()}; calcula el \codigo{Content-Length} sobre los \emph{bytes} UTF-8
+del cuerpo, nunca sobre \codigo{String.length()}, porque un \codigo{Content-Length}
+incorrecto desincroniza el keep-alive. El \codigo{server/http/Manejador.java} es
+una interfaz funcional pura \codigo{Solicitud} a \codigo{Respuesta}: no conoce el
+\codigo{SocketChannel} ni los \emph{interestOps}.
+
+\begin{lstlisting}[language=Java,caption={Manejador: handler como funcion pura}]
+@FunctionalInterface
+public interface Manejador {
+    Respuesta manejar(Solicitud s);
+}
+\end{lstlisting}
+
+Finalmente, \codigo{server/http/Ruteador.java} replica el \emph{longest-prefix} de
+\codigo{HttpServer.createContext}: \codigo{registrar()} asocia un prefijo de path
+a un \codigo{Manejador} y a la marca \codigo{INLINE} o \codigo{WORKER}, y
+\codigo{resolver()} devuelve la ruta cuyo prefijo, siendo prefijo del path, sea el
+mas largo. La validacion del verbo HTTP (responder 405) queda en cada handler;
+aqui solo se rutea por path.
+
+\begin{lstlisting}[language=Java,caption={Resolucion por prefijo mas largo}]
+public Ruta resolver(String path) {
+    Ruta mejor = null;
+    int largo = -1;
+    for (Entrada e : entradas) {
+        if (path.startsWith(e.prefijo) && e.prefijo.length() > largo) {
+            mejor = e.ruta;
+            largo = e.prefijo.length();
+        }
+    }
+    return mejor;
+}
+\end{lstlisting}

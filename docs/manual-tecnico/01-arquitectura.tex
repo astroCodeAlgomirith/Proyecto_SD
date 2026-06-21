@@ -1,0 +1,208 @@
+\section{Arquitectura general}
+
+El Mini Banco Concurrente Distribuido es un sistema de tres nodos que mantiene
+en memoria un conjunto de cuentas y atiende cuatro operaciones bancarias por
+HTTP. El estado no vive en ningun gestor de base de datos: las cuentas se cargan
+desde un CSV al arrancar y residen en estructuras concurrentes del proceso Java.
+Esta seccion describe la topologia de los nodos, el modelo de datos, el cableado
+del servidor en \codigo{BancoHttp.crear()} y la organizacion de los paquetes.
+
+\subsection{Vision general: tres nodos con lider fijo}
+
+El despliegue usa tres procesos identicos: \codigo{nodo-1} como lider fijo y
+\codigo{nodo-2} y \codigo{nodo-3} como replicas. Todas las lecturas y escrituras
+de la logica bancaria se dirigen al lider; las replicas siguen al lider y aplican
+sus transacciones en vivo, de modo que conservan una copia consistente del estado
+sin atender la operacion bancaria directamente.
+
+El rol no se compila ni se configura en codigo: lo decide la variable de entorno
+\codigo{BANCO\_LIDER\_HOST}. Si no esta definida, el nodo es LIDER; si esta
+definida, el nodo es REPLICA y apunta a ese host. El criterio vive en
+\codigo{server/MainServer.java}:
+
+\begin{lstlisting}[language=Java,caption={Eleccion de rol por variable de entorno (MainServer.java)}]
+/** LIDER si no hay BANCO_LIDER_HOST; en otro caso REPLICA. */
+private static boolean esLider() {
+    String liderHost = System.getenv("BANCO_LIDER_HOST");
+    return liderHost == null || liderHost.isBlank();
+}
+\end{lstlisting}
+
+El mismo metodo gobierna el arranque de la replicacion: el lider levanta un
+\codigo{ServidorReplicacion} en un puerto TCP, mientras que la replica crea un
+\codigo{ClienteReplicacion} que se conecta al lider para recibir y aplicar las
+transacciones.
+
+\begin{lstlisting}[language=Java,caption={Arranque de replicacion segun el rol (MainServer.java)}]
+if (esLider()) {
+    new ServidorReplicacion(CuentaRepository.get(), puertoRepl).iniciar();
+    System.out.println("Rol: LIDER - replicacion TCP en puerto " + puertoRepl);
+} else {
+    String liderHost = System.getenv("BANCO_LIDER_HOST");
+    new ClienteReplicacion(CuentaRepository.get(), liderHost, puertoRepl).iniciar();
+    System.out.println("Rol: REPLICA - siguiendo a " + liderHost + ":" + puertoRepl);
+}
+\end{lstlisting}
+
+\begin{nota}
+Solo el lider activa el log durable en Cloud Storage (variable
+\codigo{BANCO\_GCS\_BUCKET}), y lo hace ANTES de servir trafico para poder
+recuperar el estado reaplicando el log sobre las cuentas del CSV en caso de que
+todos los nodos hubieran caido.
+\end{nota}
+
+\subsection{Modelo de datos en memoria}
+
+El dataset son aproximadamente 820,000 cuentas que se cargan desde
+\codigo{alumnos.csv} al iniciar el nodo. La carga la hace
+\codigo{data/AlumnosLoader.java}, que lee el archivo linea por linea: el
+\codigo{id} de cada cuenta es el numero de linea en orden de lectura empezando en
+1. El CSV no tiene cabecera, por lo que la primera fila ya es \codigo{id=1}.
+
+Una decision central del modelo es guardar el dinero SIEMPRE en centavos como
+\codigo{long}, nunca como \codigo{double}, para que el invariante de suma
+constante de saldos se mantenga exacto. El loader convierte el saldo decimal del
+CSV a centavos enteros:
+
+\begin{lstlisting}[language=Java,caption={Carga de cuentas con id base 1 y saldo en centavos (AlumnosLoader.java)}]
+id++; // base 1, en orden de lectura
+long centavos = new BigDecimal(c[3].trim())
+        .movePointRight(2)
+        .setScale(0, RoundingMode.HALF_UP)
+        .longValueExact();
+repo.put(new Cuenta(id, c[0].trim(), c[1].trim(), c[2].trim(), centavos));
+\end{lstlisting}
+
+La entidad es \codigo{model/Cuenta.java}. Expone \codigo{id}, los datos del
+propietario y el saldo en centavos, y trae un \codigo{ReentrantLock} por cuenta
+que las transferencias toman en orden de \codigo{id} para evitar interbloqueos. El
+saldo se ofrece como decimal exacto solo al construir el JSON de salida, via
+\codigo{saldoDecimal()}, que divide los centavos entre 100 con
+\codigo{BigDecimal}.
+
+\begin{lstlisting}[language=Java,caption={Saldo en centavos y conversion a decimal exacto (Cuenta.java)}]
+private long saldoCentavos;
+
+// Lock por cuenta para transferencias concurrentes (se toma en orden de id).
+public final ReentrantLock lock = new ReentrantLock();
+
+/** Saldo como decimal exacto (centavos / 100) para el JSON de salida. */
+public BigDecimal saldoDecimal() {
+    return BigDecimal.valueOf(saldoCentavos, 2);
+}
+\end{lstlisting}
+
+Cada transferencia confirmada se representa como \codigo{model/Transaccion.java},
+un \codigo{record} inmutable con un numero de secuencia que impone un orden total
+sobre las operaciones; ese \codigo{seq} es la base de la replicacion y del log
+durable.
+
+\begin{lstlisting}[language=Java,caption={Transaccion con orden total (Transaccion.java)}]
+/** Una transferencia registrada con su numero de secuencia (orden total). */
+public record Transaccion(long seq, int origenId, int destinoId, long montoCentavos) {
+}
+\end{lstlisting}
+
+El almacen es \codigo{data/CuentaRepository.java}, un singleton sin SGBD que
+guarda las cuentas en un \codigo{ConcurrentHashMap} y lleva la secuencia con un
+\codigo{AtomicLong}. Su metodo \codigo{transferir()} es atomico: valida monto y
+cuentas, bloquea las dos cuentas en orden de \codigo{id}, mueve el saldo, asigna
+el \codigo{seq} y notifica al observador del log durable.
+
+\begin{lstlisting}[language=Java,caption={Bloqueo ordenado y conmutacion atomica del saldo (CuentaRepository.java)}]
+// Bloqueo en orden de id (menor primero) para no provocar deadlock.
+Cuenta primero = origenId < destinoId ? origen : destino;
+Cuenta segundo = origenId < destinoId ? destino : origen;
+primero.lock.lock();
+segundo.lock.lock();
+try {
+    if (origen.getSaldoCentavos() < montoCentavos) {
+        return Resultado.de(Estado.SALDO_INSUFICIENTE);
+    }
+    origen.setSaldoCentavos(origen.getSaldoCentavos() - montoCentavos);
+    destino.setSaldoCentavos(destino.getSaldoCentavos() + montoCentavos);
+    long seq = secuencia.incrementAndGet();
+    // ...
+}
+\end{lstlisting}
+
+\begin{advertencia}
+No hay base de datos. Todo el estado es volatil: si el proceso del lider
+termina, la unica copia durable es el log en Cloud Storage. Las cuentas creadas
+en caliente via \codigo{/api/register} que no esten en el CSV no se recuperan tras
+un reinicio en frio.
+\end{advertencia}
+
+\subsection{Cableado del servidor en BancoHttp}
+
+El servidor HTTP de cada nodo se arma en \codigo{server/BancoHttp.java}, mediante
+\codigo{crear()}, compartido por \codigo{MainServer} y por las pruebas. Ahi se
+registra cada ruta con su \emph{handler} y se indica en que reactor se ejecuta:
+las cuatro operaciones del banco se sirven INLINE en el hilo de I/O salvo
+\codigo{/api/login} y \codigo{/api/register} (bcrypt) y \codigo{/panel} (consulta
+a los peers), que van al pool WORKER por ser bloqueantes.
+
+\begin{lstlisting}[language=Java,caption={Registro de rutas, handlers y reactores (BancoHttp.java)}]
+Ruteador r = new Ruteador()
+        .registrar("/api/register", auth, Ruteador.WORKER)
+        .registrar("/api/login", auth, Ruteador.WORKER)
+        .registrar("/api/accounts", new AccountHandler(), Ruteador.INLINE)
+        .registrar("/api/transactions/transfer", new TransferHandler(), Ruteador.INLINE)
+        .registrar("/stats", new StatsHandler(), Ruteador.INLINE)
+        .registrar("/panel", new PanelHandler(idLocal, peers), Ruteador.WORKER)
+        .registrar("/", new PaginaHandler(), Ruteador.INLINE);
+return new ServidorNio(puerto, r, reactores(), hilosWorker());
+\end{lstlisting}
+
+El numero de reactores (hilos de I/O) y de hilos worker se calcula a partir de
+los nucleos disponibles y se puede ajustar con \codigo{BANCO\_REACTORES} y
+\codigo{BANCO\_WORKERS}; en una maquina de 4 vCPU se usan 3 reactores por defecto.
+
+\subsubsection{Flujo de alto nivel de una peticion}
+
+Una peticion al lider recorre las siguientes etapas:
+
+\begin{itemize}
+\item \codigo{MainServer} carga el CSV con \codigo{AlumnosLoader.cargar()} y crea
+  el servidor con \codigo{BancoHttp.crear()}, que devuelve un \codigo{ServidorNio}.
+\item El \codigo{ServidorNio} acepta la conexion en un reactor; el
+  \codigo{Ruteador} elige el handler por el prefijo de la ruta y lo ejecuta INLINE
+  o en el pool WORKER segun lo registrado.
+\item El handler (p. ej. \codigo{TransferHandler}) parsea el cuerpo con
+  \codigo{json/Json.java}, opera sobre \codigo{CuentaRepository.get()} y, en el
+  caso de transferir, dispara \codigo{transferir()}, que asigna el \codigo{seq} y
+  notifica al observador del log durable.
+\item La respuesta vuelve serializada como JSON con \codigo{Json.toJson()}.
+\end{itemize}
+
+El parseo y la serializacion JSON se centralizan en \codigo{json/Json.java}, que
+envuelve a gson:
+
+\begin{lstlisting}[language=Java,caption={Fachada JSON centralizada (Json.java)}]
+public static JsonObject parse(String body) {
+    return JsonParser.parseString(body).getAsJsonObject();
+}
+
+public static String toJson(Object o) {
+    return GSON.toJson(o);
+}
+\end{lstlisting}
+
+\subsection{Estructura de paquetes}
+
+El codigo vive bajo \codigo{com.escom.banco} con esta separacion de
+responsabilidades:
+
+\begin{tablaglab}{L{4.5cm} L{8.5cm}}
+\thead{Paquete} & \thead{Responsabilidad} \\ \midrule
+model       & Entidades de dominio: \codigo{Cuenta} y \codigo{Transaccion}. \\
+data        & Almacen en memoria y carga: \codigo{CuentaRepository}, \codigo{AlumnosLoader}, \codigo{RegistroTransacciones}. \\
+server      & Nodo HTTP y handlers de las rutas (\codigo{MainServer}, \codigo{BancoHttp}, los \codigo{*Handler}). \\
+server.http & Capa HTTP propia: \codigo{Ruteador}, \codigo{ParserHttp}, \codigo{Solicitud}, \codigo{Respuesta}. \\
+server.nio  & Servidor no bloqueante: \codigo{ServidorNio}, \codigo{Reactor}, \codigo{Conexion}. \\
+replicacion & Lider/replica por TCP: \codigo{ServidorReplicacion}, \codigo{ClienteReplicacion}, \codigo{CodecTransaccion}. \\
+almacen     & Log durable en Cloud Storage: \codigo{AlmacenGcs}, \codigo{GcsSubidor}. \\
+auth        & Identidad y JWT: \codigo{AuthService}, \codigo{JWTUtil}, \codigo{PasswordUtil}. \\
+json        & Fachada de serializacion sobre gson: \codigo{Json}. \\
+carga       & Generador de carga para pruebas: \codigo{GeneradorCarga}. \\
+\end{tablaglab}

@@ -1,0 +1,157 @@
+\section{Despliegue en Google Cloud Platform}
+
+El cluster del mini banco se despliega en el proyecto \codigo{sd-final-eddndev}
+de Google Cloud Platform, sobre la zona \codigo{us-central1-c}. Son tres maquinas
+virtuales de la serie E2 (obligatoria para este proyecto): \codigo{nodo-1} actua
+como lider en una \codigo{e2-standard-4} (4 vCPU), mientras que \codigo{nodo-2} y
+\codigo{nodo-3} son replicas en \codigo{e2-standard-2} (2 vCPU). El rol de cada
+nodo no se fija en la configuracion de la VM, sino que lo deduce el propio
+binario a partir de variables de entorno (ver \codigo{MainServer.java}), por lo
+que la imagen desplegada es identica en las tres maquinas.
+
+\subsection{Topologia y firewall}
+
+El lider expone su API HTTP en una IP estatica reservada (\codigo{34.136.17.97}),
+de modo que los clientes y el dashboard siempre encuentran la misma direccion
+aunque la VM se reinicie o se vuelva a crear. Las tres VMs escuchan el trafico
+HTTP en el puerto \codigo{8080}, valor por defecto del nodo segun
+\codigo{MainServer.java}:
+
+\begin{lstlisting}[language=Java,caption={Puerto por defecto del nodo (MainServer.java).}]
+int puerto = 8080;
+if (args.length > 0) {
+    try { puerto = Integer.parseInt(args[0]); }
+    catch (NumberFormatException e) { System.err.println("Puerto invalido, usando 8080."); }
+}
+\end{lstlisting}
+
+El firewall del proyecto se configura con dos reglas de intencion distinta. El
+puerto \codigo{tcp:8080} se abre a Internet (\codigo{0.0.0.0/0}) para que la API y
+el panel sean accesibles desde fuera. La replicacion entre nodos viaja por el
+puerto \codigo{9090} (valor por defecto de \codigo{BANCO\_REPLICACION\_PUERTO} en
+\codigo{MainServer.java}) y se restringe a la red interna: ese canal solo debe
+ser alcanzable por las propias VMs del cluster, no desde Internet.
+
+\begin{lstlisting}[language=none,caption={Reglas de firewall: API publica, replicacion interna.}]
+gcloud compute firewall-rules create banco-http \
+  --network=default --allow=tcp:8080 --source-ranges=0.0.0.0/0
+
+gcloud compute firewall-rules create banco-replicacion \
+  --network=default --allow=tcp:9090 --source-ranges=10.128.0.0/9
+\end{lstlisting}
+
+\subsection{Despliegue sin SSH via Cloud Storage y systemd}
+
+El SSH directo a estas VMs falla por \codigo{StrictModes} de \codigo{sshd} sobre
+el directorio \codigo{home} persistido en el disco, asi que el despliegue no
+depende de iniciar sesion en las maquinas. En su lugar, los artefactos
+(\codigo{banco.jar} y \codigo{alumnos.csv}) se publican en un bucket de Cloud
+Storage, y cada VM lleva un \emph{startup-script} en su metadata que se ejecuta
+en cada arranque: instala el JRE, descarga los artefactos del bucket e instala y
+arranca un servicio de \codigo{systemd}.
+
+\begin{lstlisting}[language=none,caption={Startup-script en metadata: JRE, artefactos y servicio.}]
+#!/bin/bash
+apt-get update -y && apt-get install -y default-jre
+mkdir -p /opt/banco
+gsutil cp gs://sd-final-eddndev-artefactos/banco.jar    /opt/banco/banco.jar
+gsutil cp gs://sd-final-eddndev-artefactos/alumnos.csv  /opt/banco/alumnos.csv
+cp /opt/banco/banco.env /etc/banco.env   # variables de entorno por rol
+systemctl daemon-reload
+systemctl enable --now banco.service
+\end{lstlisting}
+
+El servicio \codigo{banco.service} corre el \emph{fat jar} con
+\codigo{Restart=always}, de forma que el nodo se vuelve a levantar solo si el
+proceso muere. La configuracion por rol se inyecta mediante un archivo
+\codigo{EnvironmentFile}, lo que evita codificar credenciales o topologia dentro
+del jar.
+
+\begin{lstlisting}[language=none,caption={Unidad systemd banco.service (Restart=always, puerto 8080).}]
+[Unit]
+Description=Mini Banco Distribuido
+After=network-online.target
+
+[Service]
+EnvironmentFile=/etc/banco.env
+ExecStart=/usr/bin/java -jar /opt/banco/banco.jar 8080
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+\end{lstlisting}
+
+\begin{nota}
+Re-desplegar una version nueva no requiere SSH: basta con volver a subir
+\codigo{banco.jar} al bucket y hacer un \emph{reset} de la VM. El startup-script
+se ejecuta de nuevo en el arranque y trae el artefacto actualizado antes de
+levantar \codigo{banco.service}.
+\end{nota}
+
+\subsection{Configuracion por variables de entorno}
+
+Las tres VMs comparten el mismo jar; lo que las diferencia es el conjunto de
+variables de entorno del \codigo{EnvironmentFile}. El secreto
+\codigo{BANCO\_JWT\_SECRET} (leido en \codigo{JWTUtil.java}) debe ser identico en
+los tres nodos para que un token emitido por cualquiera sea valido en los demas.
+La tabla resume las variables relevantes y donde las consume el codigo.
+
+\begin{tablaglab}{L{5cm} L{8cm}}
+\thead{Variable} & \thead{Funcion y origen} \\ \midrule
+ALUMNOS\_CSV          & Ruta del dataset de cuentas; \codigo{MainServer.java}. \\
+BANCO\_JWT\_SECRET    & Secreto JWT compartido por los 3 nodos; \codigo{JWTUtil.java}. \\
+BANCO\_NODO\_ID       & Identificador del nodo (nodo-1/2/3); \codigo{MainServer.java}. \\
+BANCO\_PEERS          & Peers del panel del lider (host:port); \codigo{MainServer.java}. \\
+BANCO\_LIDER\_HOST    & Host del lider que siguen las replicas; \codigo{MainServer.java}. \\
+BANCO\_GCS\_BUCKET    & Bucket del log durable, solo lider; \codigo{MainServer.java}. \\
+BANCO\_REACTORES      & Numero de hilos de I/O del servidor; \codigo{BancoHttp.java}. \\
+\end{tablaglab}
+
+El reparto del rol no se declara: lo decide la ausencia o presencia de
+\codigo{BANCO\_LIDER\_HOST}. El metodo \codigo{esLider()} de
+\codigo{MainServer.java} considera lider a todo nodo que no tenga esa variable, y
+\codigo{iniciarReplicacion()} ramifica en consecuencia.
+
+\begin{lstlisting}[language=Java,caption={El rol se infiere de BANCO\_LIDER\_HOST (MainServer.java).}]
+private static boolean esLider() {
+    String liderHost = System.getenv("BANCO_LIDER_HOST");
+    return liderHost == null || liderHost.isBlank();
+}
+// ...
+if (esLider()) {
+    new ServidorReplicacion(CuentaRepository.get(), puertoRepl).iniciar();
+} else {
+    String liderHost = System.getenv("BANCO_LIDER_HOST");
+    new ClienteReplicacion(CuentaRepository.get(), liderHost, puertoRepl).iniciar();
+}
+\end{lstlisting}
+
+Por esa logica, el \codigo{EnvironmentFile} del lider (\codigo{nodo-1}) lleva
+\codigo{BANCO\_PEERS} y \codigo{BANCO\_GCS\_BUCKET}, pero NO \codigo{BANCO\_LIDER\_HOST};
+solo el lider activa el log durable en Cloud Storage (ver
+\codigo{iniciarAlmacenGcs()}). Las replicas (\codigo{nodo-2} y \codigo{nodo-3})
+llevan \codigo{BANCO\_LIDER\_HOST} apuntando al lider y carecen de bucket y peers.
+
+\begin{lstlisting}[language=none,caption={EnvironmentFile del lider nodo-1 (/etc/banco.env).}]
+ALUMNOS_CSV=/opt/banco/alumnos.csv
+BANCO_JWT_SECRET=<secreto-compartido>
+BANCO_NODO_ID=nodo-1
+BANCO_PEERS=nodo-2:8080,nodo-3:8080
+BANCO_GCS_BUCKET=sd-final-eddndev-log
+BANCO_REACTORES=3
+\end{lstlisting}
+
+\begin{lstlisting}[language=none,caption={EnvironmentFile de una replica nodo-2 (/etc/banco.env).}]
+ALUMNOS_CSV=/opt/banco/alumnos.csv
+BANCO_JWT_SECRET=<secreto-compartido>
+BANCO_NODO_ID=nodo-2
+BANCO_LIDER_HOST=34.136.17.97
+\end{lstlisting}
+
+\begin{advertencia}
+\codigo{BANCO\_GCS\_BUCKET} se define solo en el lider. Aun asi, el codigo esta
+blindado: \codigo{iniciarAlmacenGcs()} se invoca unicamente cuando
+\codigo{esLider()} es verdadero, asi que una replica (que tiene
+\codigo{BANCO\_LIDER\_HOST}) ignora esa variable y nunca activa el log durable.
+\end{advertencia}

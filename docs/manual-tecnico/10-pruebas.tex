@@ -1,0 +1,142 @@
+\section{Pruebas y calidad}
+
+La estrategia de pruebas del Mini Banco se apoya en un \emph{harness} propio
+escrito en Java puro, sin JUnit ni ninguna otra biblioteca externa. Esta fue una
+decision deliberada: el proyecto no agrega dependencias de pruebas para no
+inflar el \codigo{pom.xml} ni el empaquetado, y porque las suites necesitan
+levantar componentes reales (servidor NIO, sockets TCP, repositorio
+concurrente) que un framework no aporta. Todas las pruebas viven en el paquete
+\codigo{pruebas}, dentro de \codigo{src/test/java/pruebas/}, y comparten dos
+piezas de infraestructura: un corredor unico y un verificador minimo de
+aserciones.
+
+\subsection{El harness: TestRunner y MiniTest}
+
+El corredor \codigo{pruebas/TestRunner.java} invoca en secuencia el metodo
+estatico \codigo{run()} de cada suite, imprime un encabezado por suite y al
+final resume cuantas aserciones pasaron o fallaron. Si hubo al menos un fallo,
+termina con \codigo{System.exit(1)}, de modo que un script o un pipeline puede
+detectar la regresion por el codigo de salida.
+
+\begin{lstlisting}[language=Java,caption={TestRunner orquesta las suites y propaga el fallo via codigo de salida}]
+System.out.println("== CuentaRepositoryTest ==");
+CuentaRepositoryTest.run();
+// ... el resto de las suites ...
+System.out.printf("%nResultado: %d pasadas, %d fallidas%n",
+        MiniTest.pasadas(), MiniTest.fallidas());
+if (MiniTest.fallidas() > 0) System.exit(1);
+\end{lstlisting}
+
+El verificador \codigo{pruebas/MiniTest.java} sustituye a las anotaciones y
+\emph{assertions} de un framework con apenas tres metodos: \codigo{check()} para
+una condicion booleana y dos sobrecargas de \codigo{eq()} (una para
+\codigo{long} y otra para \codigo{Object}) que comparan un valor esperado contra
+el real. Lleva un par de contadores estaticos, \codigo{pasadas} y
+\codigo{fallidas}, e imprime el mensaje de la asercion que no se cumple en lugar
+de lanzar una excepcion, lo que permite que una suite reporte todas sus fallas
+en una sola corrida.
+
+\begin{lstlisting}[language=Java,caption={MiniTest: aserciones y conteo en Java puro}]
+public static void check(boolean cond, String msg) {
+    if (cond) {
+        pasadas++;
+    } else {
+        fallidas++;
+        System.out.println("  FALLO: " + msg);
+    }
+}
+
+public static void eq(long esperado, long real, String msg) {
+    check(esperado == real, msg + " (esperado " + esperado + ", real " + real + ")");
+}
+\end{lstlisting}
+
+\subsection{Como se ejecutan}
+
+Toda la bateria se corre con un solo comando, \codigo{./ejecutar\_tests.sh}, que
+primero compila con Maven y luego lanza el corredor con el classpath del jar mas
+las clases de prueba.
+
+\begin{lstlisting}[language=none,caption={ejecutar\_tests.sh: compila y corre el harness}]
+mvn -q package
+java -cp "target/banco.jar:target/test-classes" pruebas.TestRunner
+\end{lstlisting}
+
+\begin{nota}
+En total las ocho suites suman \textbf{68 aserciones} verdes. El conteo final lo
+imprime el propio \codigo{TestRunner} y, mientras todas pasen, el script termina
+con codigo de salida 0.
+\end{nota}
+
+\subsection{Que cubre cada suite}
+
+Las suites van de la logica de dominio aislada hasta los componentes
+distribuidos ejercitados con red real. Cada una se cita por su archivo fuente.
+
+\begin{itemize}
+\item \codigo{pruebas/CuentaRepositoryTest.java} (13 aserciones): valida la
+transferencia basica en centavos, los casos borde (\codigo{MISMA\_CUENTA},
+\codigo{MONTO\_INVALIDO}, \codigo{NO\_ENCONTRADA}, \codigo{SALDO\_INSUFICIENTE})
+y, sobre todo, la invariante de conservacion del dinero lanzando 8 hilos con
+5000 operaciones cada uno (40 mil transferencias concurrentes) y comprobando que
+\codigo{saldoTotalCentavos()} no cambia.
+
+\item \codigo{pruebas/AlumnosLoaderTest.java} (7 aserciones): carga un CSV
+temporal con \codigo{AlumnosLoader.cargar()} y verifica el numero de filas, la
+numeracion de cuentas base 1, el armado del propietario y la conversion exacta a
+centavos (por ejemplo \codigo{36180311} para \codigo{361803.11}).
+
+\item \codigo{pruebas/ReplicacionTest.java} (11 aserciones): comprueba que el
+log de transacciones registra en orden y que una replica converge al lider
+reaplicando \codigo{desde(0)}, incluido el escenario de recuperacion
+incremental (catch-up) en que la replica se quedo en la secuencia 150 y pide
+solo de la 151 en adelante.
+
+\item \codigo{pruebas/ReplicacionTcpTest.java} (4 aserciones): la misma
+convergencia pero con \emph{sockets reales}. Levanta \codigo{ServidorReplicacion}
+en un puerto efimero y un \codigo{ClienteReplicacion} que se conecta por TCP a
+\codigo{127.0.0.1}; valida el catch-up inicial y que el \emph{streaming} en vivo
+propague nuevas transferencias.
+
+\item \codigo{pruebas/GeneradorCargaTest.java} (5 aserciones): corre el
+\codigo{GeneradorCarga} unos 2 segundos contra un nodo HTTP real en proceso
+(\codigo{BancoHttp.crear(0)}) y verifica que hubo lecturas y transferencias
+exitosas sobre la pila HTTP, que descubrio el numero de cuentas via
+\codigo{/stats} y que la invariante de suma se conserva.
+
+\item \codigo{pruebas/PanelTest.java} (8 aserciones): comprueba que
+\codigo{/panel} agrega el \codigo{/stats} local, el de un peer vivo y marca como
+caido un peer inalcanzable, ademas de confirmar que \codigo{dashboard.html} viaja
+en el jar y consume \codigo{/panel} de forma reactiva con \codigo{setInterval}.
+
+\item \codigo{pruebas/AlmacenGcsTest.java} (10 aserciones): prueba el log durable
+con un \codigo{Subidor} falso (sin tocar GCS ni la red) que puede fallar las
+primeras N veces. Verifica persistencia en orden, reintentos tras fallos
+transitorios, el sembrado del contador con objetos existentes, el enganche al
+commit via observador y la recuperacion reaplicando el log.
+
+\item \codigo{pruebas/ParserHttpTest.java} (10 aserciones): ejercita el parser
+HTTP/1.1 del servidor NIO con \emph{sockets crudos}, en los casos borde que un
+cliente de alto nivel no toca: dos requests por \codigo{keep-alive}, pipelining
+en un mismo segmento TCP, body partido en dos segmentos, respuesta 405 con
+\codigo{Content-Length: 0} que no rompe la conexion, query string ignorada,
+header \codigo{Authorization} sin distincion de mayusculas y ausencia de
+autorizacion (401).
+\end{itemize}
+
+\begin{lstlisting}[language=Java,caption={ParserHttpTest: dos requests en una sola conexion keep-alive sobre socket crudo}]
+try (Socket s = new Socket("127.0.0.1", puerto)) {
+    OutputStream out = s.getOutputStream();
+    enviar(out, "GET /stats HTTP/1.1\r\nHost: x\r\n\r\n");
+    MiniTest.eq(200, leerResp(s.getInputStream())[0], "keep-alive: 1a request GET /stats -> 200");
+    enviar(out, "GET /stats HTTP/1.1\r\nHost: x\r\n\r\n");
+    MiniTest.eq(200, leerResp(s.getInputStream())[0], "keep-alive: 2a request en la MISMA conexion -> 200");
+}
+\end{lstlisting}
+
+\begin{consejo}
+La mezcla de pruebas de dominio puro (\codigo{CuentaRepositoryTest}) con pruebas
+de integracion sobre red real (\codigo{ReplicacionTcpTest},
+\codigo{GeneradorCargaTest}, \codigo{ParserHttpTest}) da confianza tanto en la
+logica como en el transporte, sin pagar el costo de un framework externo.
+\end{consejo}

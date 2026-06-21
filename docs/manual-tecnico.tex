@@ -1,0 +1,28 @@
+% Manual tecnico del Mini Banco Concurrente Distribuido en la Nube.
+% Compilar: latexmk -lualatex manual-tecnico.tex   (o -xelatex)
+% Contenido modular: un archivo por capitulo en manual-tecnico/.
+\documentclass[11pt]{article}
+\usepackage{caratula}
+\definirTitulo{Manual técnico}
+
+\begin{document}
+
+\portada{Manual\\técnico}
+        {Arquitectura, capa HTTP sobre NIO, replicación líder-réplica,
+         recuperación desde Cloud Storage, generador de carga, rendimiento,
+         despliegue y pruebas del Mini Banco Concurrente Distribuido en la Nube.}
+
+\indiceglab
+
+\input{manual-tecnico/01-arquitectura}
+\input{manual-tecnico/02-servidor-nio}
+\input{manual-tecnico/03-api-autenticacion}
+\input{manual-tecnico/04-concurrencia-transferencias}
+\input{manual-tecnico/05-replicacion}
+\input{manual-tecnico/06-persistencia-gcs}
+\input{manual-tecnico/07-generador-rendimiento}
+\input{manual-tecnico/08-dashboard}
+\input{manual-tecnico/09-despliegue}
+\input{manual-tecnico/10-pruebas}
+
+\end{document}

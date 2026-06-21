@@ -1,0 +1,199 @@
+\section{API y autenticacion}
+
+El nodo expone una API REST sobre HTTP con exactamente cuatro endpoints
+funcionales, mas un \codigo{/stats} de monitoreo. Las rutas se declaran en
+\codigo{server/BancoHttp.java} y cada una resuelve con un manejador propio.
+El registro y el inicio de sesion crean credenciales y emiten un JWT; las
+operaciones sobre cuentas y transferencias exigen ese token en cada peticion.
+
+\subsection{Endpoints REST}
+
+Los cuatro endpoints del proyecto son: \codigo{POST /api/register} para crear
+una credencial, \codigo{POST /api/login} que devuelve un JWT, \codigo{GET
+/api/accounts/\{id\}} para consultar una cuenta y \codigo{POST
+/api/transactions/transfer} para mover saldo. Los dos ultimos exigen el header
+\codigo{Authorization: Bearer <token>}.
+
+\begin{tablaglab}{L{5.5cm} C{1.6cm} C{1.5cm} L{4cm}}
+\thead{Ruta} & \thead{Metodo} & \thead{JWT} & \thead{Manejador} \\ \midrule
+/api/register                  & POST & No  & AuthHandler \\
+/api/login                     & POST & No  & AuthHandler \\
+/api/accounts/\{id\}           & GET  & Si  & AccountHandler \\
+/api/transactions/transfer     & POST & Si  & TransferHandler \\
+\end{tablaglab}
+
+El registro (\codigo{server/AuthHandler.java}) recibe \codigo{username} y
+\codigo{password}, los valida y delega en \codigo{AuthService}. Devuelve
+\codigo{201} si crea la credencial o \codigo{409} si el usuario ya existe.
+
+\begin{lstlisting}[language=Java,caption={Registro de credenciales en AuthHandler}]
+private Respuesta registrar(Solicitud s) {
+    JsonObject in = parse(s);
+    if (in == null) return Respuesta.error(400, "JSON invalido");
+    if (!in.has("username") || !in.has("password")) {
+        return Respuesta.error(400, "Faltan username/password");
+    }
+    boolean creado = auth.register(in.get("username").getAsString(),
+                                   in.get("password").getAsString());
+    if (creado) return Respuesta.json(201, "{\"status\":\"registrado\"}");
+    return Respuesta.error(409, "Usuario ya existe");
+}
+\end{lstlisting}
+
+El login valida las mismas dos llaves y, si las credenciales son correctas,
+devuelve el token; si no, responde \codigo{401}.
+
+\begin{lstlisting}[language=none,caption={Respuesta de POST /api/login}]
+{ "token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.<payload>.<firma>" }
+\end{lstlisting}
+
+\subsection{Formatos JSON de cuentas y transferencias}
+
+\codigo{server/AccountHandler.java} extrae el id de la ruta
+(\codigo{/api/accounts/\{id\}}), consulta el \codigo{CuentaRepository} y arma el
+JSON a mano (sin gson) por ser la ruta caliente. La respuesta lleva
+\codigo{id}, \codigo{propietario} y \codigo{balance}.
+
+\begin{lstlisting}[language=Java,caption={Construccion de la respuesta de cuenta}]
+Cuenta c = repo.get(id);
+if (c == null) return Respuesta.error(404, "Cuenta no encontrada");
+
+String json = "{\"id\":" + c.id
+        + ",\"propietario\":\"" + c.propietario()
+        + "\",\"balance\":" + c.saldoDecimal().toPlainString() + "}";
+return Respuesta.json(200, json);
+\end{lstlisting}
+
+\begin{lstlisting}[language=none,caption={Respuesta de GET /api/accounts/125}]
+{ "id": 125, "propietario": "...", "balance": 15750.25 }
+\end{lstlisting}
+
+La transferencia (\codigo{server/TransferHandler.java}) espera en el cuerpo
+\codigo{sourceAccountId} y \codigo{targetAccountId} como cadenas y
+\codigo{amount} como decimal. El monto se convierte a centavos con
+\codigo{BigDecimal} para evitar errores de coma flotante antes de invocar
+\codigo{CuentaRepository.transferir()}.
+
+\begin{lstlisting}[language=Java,caption={Parseo de ids y monto en TransferHandler}]
+origen  = Integer.parseInt(in.get("sourceAccountId").getAsString().trim());
+destino = Integer.parseInt(in.get("targetAccountId").getAsString().trim());
+centavos = new BigDecimal(in.get("amount").getAsString().trim())
+        .movePointRight(2)
+        .setScale(0, RoundingMode.HALF_UP)
+        .longValueExact();
+\end{lstlisting}
+
+\begin{lstlisting}[language=none,caption={Cuerpo de POST /api/transactions/transfer}]
+{ "sourceAccountId": "123", "targetAccountId": "456", "amount": 200.00 }
+\end{lstlisting}
+
+El resultado del repositorio se traduce a codigos REST: \codigo{200} con
+\codigo{seq} si la operacion es correcta, \codigo{404} si una cuenta no existe y
+\codigo{400} para misma cuenta, monto invalido o saldo insuficiente.
+
+\begin{tablaglab}{C{1.8cm} L{8.5cm}}
+\thead{Codigo} & \thead{Significado en la API} \\ \midrule
+200 & Operacion correcta (consulta o transferencia). \\
+201 & Credencial registrada. \\
+400 & JSON o datos invalidos, faltan campos. \\
+401 & Sin JWT valido o credenciales incorrectas. \\
+404 & Cuenta no encontrada. \\
+409 & Usuario ya existe. \\
+\end{tablaglab}
+
+\begin{nota}
+\codigo{server/StatsHandler.java} sirve \codigo{GET /stats} sin JWT: es solo
+monitoreo de un nodo y entrega el saldo total en centavos para verificar el
+invariante de conservacion en una sola peticion.
+\end{nota}
+
+\subsection{Autenticacion: JWT y bcrypt}
+
+Las credenciales viven aparte de las cuentas: \codigo{auth/User.java} guarda
+\codigo{username} y el hash de la contrasena, y \codigo{auth/UserRepository.java}
+las almacena en un \codigo{ConcurrentHashMap} usando \codigo{saveIfAbsent()}
+para evitar duplicados. \codigo{auth/AuthService.java} coordina ambos pasos:
+hashea al registrar y verifica al iniciar sesion antes de emitir el token.
+
+\begin{lstlisting}[language=Java,caption={Flujo de login en AuthService}]
+public String login(String username, String password) {
+    User u = repo.findByUsername(username);
+    if (u == null) return null;
+    if (!PasswordUtil.verify(password, u.getPasswordHash())) return null;
+    return JWTUtil.generateToken(username);
+}
+\end{lstlisting}
+
+El hashing usa bcrypt mediante la libreria jbcrypt en
+\codigo{auth/PasswordUtil.java} (\codigo{BCrypt.hashpw} con
+\codigo{BCrypt.gensalt} al guardar y \codigo{BCrypt.checkpw} al verificar). Es un
+algoritmo deliberadamente lento (~50-100 ms), por eso \codigo{register} y
+\codigo{login} corren en el pool WORKER y no en el reactor.
+
+El token se emite y valida con HMAC256 (libreria \codigo{com.auth0} java-jwt) en
+\codigo{auth/JWTUtil.java}. El secreto y el issuer son fijos para que un token
+emitido por el lider valide en las replicas; el secreto se toma de
+\codigo{BANCO\_JWT\_SECRET}.
+
+\begin{lstlisting}[language=Java,caption={Emision y verificacion del JWT}]
+public static String generateToken(String username) {
+    return JWT.create()
+            .withIssuer(ISSUER)
+            .withSubject(username)
+            .sign(ALGO);
+}
+
+public static DecodedJWT verify(String token) throws JWTVerificationException {
+    return JWT.require(ALGO).withIssuer(ISSUER).build().verify(token);
+}
+\end{lstlisting}
+
+\begin{advertencia}
+\codigo{BANCO\_JWT\_SECRET} debe ser identico en los tres nodos. Si difiere, un
+token valido en el lider sera rechazado con \codigo{401} en las replicas.
+\end{advertencia}
+
+\subsection{Validacion del Bearer y cache de tokens}
+
+Los manejadores protegidos llaman a \codigo{HttpUtil.usuarioAutenticado()}
+(\codigo{server/HttpUtil.java}) al inicio: si devuelve \codigo{null} responden
+\codigo{401}. El metodo lee el header \codigo{Authorization}, exige el prefijo
+\codigo{Bearer }, recorta el token y verifica la firma con \codigo{JWTUtil}.
+
+Como la validacion HMAC se repite en cada peticion con el mismo token, los
+tokens ya verificados se guardan en un \codigo{ConcurrentHashMap}
+(token a subject) con tope de \codigo{TOPE\_CACHE} entradas, evitando recalcular
+la firma en la ruta caliente.
+
+\begin{lstlisting}[language=Java,caption={Validacion del Bearer con cache en HttpUtil}]
+public static String usuarioAutenticado(Solicitud s) {
+    String auth = s.header("Authorization");
+    if (auth == null || !auth.startsWith("Bearer ")) return null;
+    String token = auth.substring(7);
+    String cacheado = TOKENS_VALIDOS.get(token);
+    if (cacheado != null) return cacheado;
+    try {
+        String sub = JWTUtil.verify(token).getSubject();
+        if (TOKENS_VALIDOS.size() < TOPE_CACHE) TOKENS_VALIDOS.put(token, sub);
+        return sub;
+    } catch (Exception e) {
+        return null;
+    }
+}
+\end{lstlisting}
+
+Finalmente, \codigo{server/BancoHttp.java} mapea cada ruta a su manejador y
+decide donde se ejecuta. \codigo{/api/accounts} y
+\codigo{/api/transactions/transfer} se sirven INLINE en el reactor (son cortas y
+de alta frecuencia), mientras que \codigo{/api/register} y \codigo{/api/login}
+van al pool WORKER por el costo de bcrypt.
+
+\begin{lstlisting}[language=Java,caption={Mapeo de rutas en BancoHttp}]
+Ruteador r = new Ruteador()
+        .registrar("/api/register", auth, Ruteador.WORKER)
+        .registrar("/api/login", auth, Ruteador.WORKER)
+        .registrar("/api/accounts", new AccountHandler(), Ruteador.INLINE)
+        .registrar("/api/transactions/transfer", new TransferHandler(), Ruteador.INLINE)
+        .registrar("/stats", new StatsHandler(), Ruteador.INLINE)
+        // ...
+\end{lstlisting}

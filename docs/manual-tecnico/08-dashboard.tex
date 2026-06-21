@@ -1,0 +1,131 @@
+\section{Dashboard de observabilidad}
+
+El sistema expone un panel web de una sola pagina que muestra, en tiempo real,
+el estado de cada nodo del cluster: rol, numero de cuentas, saldo total, numero
+de transferencias, identificador de la ultima transaccion, porcentajes de CPU,
+RAM y disco, y el numero de transacciones registradas en Cloud Storage. El panel
+no necesita servidor adicional ni dependencias de frontend: es HTML estatico
+servido por el propio nodo y alimentado por dos endpoints JSON.
+
+\subsection{Pagina servida en GET /}
+
+El recurso \codigo{src/main/resources/dashboard.html} se empaqueta dentro del jar
+y lo entrega \codigo{PaginaHandler} en \codigo{GET /}. Para evitar leer el archivo
+en cada peticion, el manejador lo carga una sola vez en un arreglo de bytes
+estatico y lo cachea; si el recurso falta responde 500 y a cualquier ruta distinta
+de la raiz responde 404.
+
+\begin{lstlisting}[language=Java,caption={PaginaHandler.java: dashboard cacheado en bytes}]
+private static final byte[] HTML = cargar();
+
+@Override
+public Respuesta manejar(Solicitud s) {
+    if (!"GET".equalsIgnoreCase(s.metodo())) return Respuesta.sinCuerpo(405);
+    if (!"/".equals(s.path())) return Respuesta.sinCuerpo(404);
+    if (HTML == null) return Respuesta.sinCuerpo(500);
+    return Respuesta.html(200, HTML);
+}
+\end{lstlisting}
+
+\subsection{Estado de un nodo: GET /stats}
+
+\codigo{StatsHandler} responde en \codigo{GET /stats} con el snapshot del nodo
+local. Es publico (sin JWT) porque solo expone monitoreo de un nodo. El metodo
+estatico \codigo{StatsHandler.snapshot()} construye un mapa ordenado que tambien
+reutiliza el panel agregado. Determina el rol leyendo la variable de entorno
+\codigo{BANCO\_LIDER\_HOST} (vacia implica \codigo{LIDER}, definida implica
+\codigo{REPLICA}) y publica el saldo total en centavos como \codigo{long} exacto
+para verificar el invariante de consistencia en una sola peticion.
+
+\begin{lstlisting}[language=Java,caption={StatsHandler.java: snapshot del nodo}]
+out.put("rol", rol);
+out.put("cuentas", repo.tamano());
+out.put("saldoTotalCentavos", totalCent);
+out.put("transferencias", repo.totalTransferencias());
+out.put("ultimaTxId", repo.ultimaTxId());
+out.put("secuencia", repo.secuenciaActual());
+out.put("cpu", SistemaMetricas.cpuPorcentaje());
+out.put("ram", SistemaMetricas.ramPorcentaje());
+out.put("disco", SistemaMetricas.discoPorcentaje());
+out.put("txEnStorage", repo.txEnStorage()); // -1 si el log GCS esta deshabilitado
+\end{lstlisting}
+
+Las metricas de sistema viven en \codigo{SistemaMetricas} y se calculan solo con
+APIs del JDK, sin dependencias externas: el \codigo{\%}CPU y el \codigo{\%}RAM se
+obtienen del \codigo{OperatingSystemMXBean} de \codigo{com.sun.management}, y el
+\codigo{\%}Disco se mide con un \codigo{File} sobre la raiz del sistema de
+archivos.
+
+\begin{lstlisting}[language=Java,caption={SistemaMetricas.java: CPU y RAM sin dependencias}]
+public static double cpuPorcentaje() {
+    double carga = OS.getCpuLoad();
+    return carga < 0 ? 0.0 : redondear(carga * 100.0);
+}
+
+public static double ramPorcentaje() {
+    long total = OS.getTotalMemorySize();
+    if (total <= 0) return 0.0;
+    long usada = total - OS.getFreeMemorySize();
+    return redondear(100.0 * usada / total);
+}
+\end{lstlisting}
+
+\subsection{Vista agregada del cluster: GET /panel}
+
+\codigo{PanelHandler} responde en \codigo{GET /panel} y construye la vista
+completa del cluster que consume el dashboard. El lider toma su propio
+\codigo{StatsHandler.snapshot()} y, ademas, consulta el \codigo{/stats} de cada
+peer. La consulta es un \codigo{fetch} del lado del servidor (con
+\codigo{HttpClient}), lo que evita problemas de CORS en el navegador y centraliza
+la agregacion en un solo origen. Cada nodo se envuelve con metadatos
+\codigo{host} y \codigo{alcanzable}; si un peer no responde dentro del timeout de
+2 s, se marca \codigo{alcanzable:false} sin abortar el resto del panel.
+
+\begin{lstlisting}[language=Java,caption={PanelHandler.java: agregado lider + peers}]
+List<Map<String, Object>> nodos = new ArrayList<>();
+nodos.add(conMeta(idLocal, true, StatsHandler.snapshot()));
+for (String peer : peers) nodos.add(consultarPeer(peer));
+// ...
+private Map<String, Object> consultarPeer(String hostPuerto) {
+    try {
+        HttpRequest req = HttpRequest.newBuilder(URI.create("http://" + hostPuerto + "/stats"))
+                .timeout(Duration.ofSeconds(2)).GET().build();
+        String cuerpo = http.send(req, BodyHandlers.ofString()).body();
+        // ...
+        return conMeta(hostPuerto, true, m);
+    } catch (Exception e) {
+        return conMeta(hostPuerto, false, new LinkedHashMap<>());
+    }
+}
+\end{lstlisting}
+
+\begin{nota}
+Como \codigo{HttpClient.send} hacia los peers es bloqueante (hasta 2 s),
+\codigo{PanelHandler} se asigna al pool WORKER; si corriera en un reactor lo
+estancaria. Asi un peer caido nunca cuelga el panel del resto del cluster.
+\end{nota}
+
+\subsection{Refresco reactivo en el navegador}
+
+El JavaScript embebido en \codigo{dashboard.html} consulta \codigo{/panel},
+dibuja una tarjeta por nodo (con badge \codigo{LIDER}, \codigo{REPLICA} o
+\codigo{CAIDO} segun el campo \codigo{alcanzable}) y compara los
+\codigo{saldoTotalCentavos} de los nodos vivos para senalar si los saldos son
+consistentes entre nodos. El refresco es reactivo: tras la carga inicial, un
+\codigo{setInterval} repite la consulta cada 2 segundos, cubriendo el punto
+extra de actualizacion automatica.
+
+\begin{lstlisting}[language=none,caption={dashboard.html: refresco automatico cada 2 s}]
+function refrescar() {
+  fetch("/panel").then(function(r){ return r.json(); })
+    .then(pintar)
+    .catch(function(){ document.getElementById("total").innerHTML =
+      '<span class="mal">no se pudo contactar al nodo</span>'; })
+    .finally(function(){
+      document.getElementById("reloj").textContent = new Date().toLocaleTimeString("es-MX");
+    });
+}
+
+refrescar();
+setInterval(refrescar, 2000);
+\end{lstlisting}
