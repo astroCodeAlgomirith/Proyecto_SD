@@ -5,6 +5,7 @@ import com.escom.banco.model.Transaccion;
 
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Consumer;
 import java.util.function.LongSupplier;
 
@@ -22,7 +23,10 @@ public class CuentaRepository {
 
     // Num. de secuencia de transaccion (base de la replicacion y el log GCS).
     private final AtomicLong secuencia = new AtomicLong(0);
-    private final AtomicLong totalTransferencias = new AtomicLong(0);
+    // LongAdder (no AtomicLong): es solo contador para /stats; en el hot path
+    // hace add sin CAS global, sum() solo lo lee /stats. Quita 1 de los 2 puntos
+    // de serializacion global por transferencia (secuencia es el otro, ineludible).
+    private final LongAdder totalTransferencias = new LongAdder();
     private volatile long ultimaTxId = 0;
     private final RegistroTransacciones registro = new RegistroTransacciones();
 
@@ -39,7 +43,7 @@ public class CuentaRepository {
     public Cuenta get(int id) { return cuentas.get(id); }
     public int tamano() { return cuentas.size(); }
 
-    public long totalTransferencias() { return totalTransferencias.get(); }
+    public long totalTransferencias() { return totalTransferencias.sum(); }
     public long ultimaTxId() { return ultimaTxId; }
     public long secuenciaActual() { return secuencia.get(); }
     public RegistroTransacciones registro() { return registro; }
@@ -82,7 +86,7 @@ public class CuentaRepository {
             origen.setSaldoCentavos(origen.getSaldoCentavos() - montoCentavos);
             destino.setSaldoCentavos(destino.getSaldoCentavos() + montoCentavos);
             long seq = secuencia.incrementAndGet();
-            totalTransferencias.incrementAndGet();
+            totalTransferencias.increment();
             ultimaTxId = seq;
             Transaccion tx = new Transaccion(seq, origenId, destinoId, montoCentavos);
             registro.agregar(tx);
@@ -111,7 +115,7 @@ public class CuentaRepository {
             origen.setSaldoCentavos(origen.getSaldoCentavos() - t.montoCentavos());
             destino.setSaldoCentavos(destino.getSaldoCentavos() + t.montoCentavos());
             registro.agregar(t);
-            totalTransferencias.incrementAndGet();
+            totalTransferencias.increment();
             ultimaTxId = t.seq();
             secuencia.accumulateAndGet(t.seq(), Math::max);
         } finally {
