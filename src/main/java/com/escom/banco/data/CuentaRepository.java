@@ -20,22 +20,26 @@ public class CuentaRepository {
 
     private final ConcurrentHashMap<Integer, Cuenta> cuentas = new ConcurrentHashMap<>();
 
-    // Num. de secuencia de transaccion (base de la replicacion y el log GCS).
     private final AtomicLong secuencia = new AtomicLong(0);
     private final AtomicLong totalTransferencias = new AtomicLong(0);
     private volatile long ultimaTxId = 0;
     private final RegistroTransacciones registro = new RegistroTransacciones();
 
-    // Observador del log durable (lo pone el lider): se le avisa cada commit.
+    private final AtomicLong saldoTotalGlobalCentavos = new AtomicLong(0);
+
     private volatile Consumer<Transaccion> observador = t -> {};
-    // Conteo de tx en el log durable (Cloud Storage); -1 = deshabilitado.
+   
     private volatile LongSupplier conteoStorage = () -> -1L;
 
     public void setObservador(Consumer<Transaccion> o) { this.observador = o; }
     public void setConteoStorage(LongSupplier s) { this.conteoStorage = s; }
     public long txEnStorage() { return conteoStorage.getAsLong(); }
 
-    public void put(Cuenta c) { cuentas.put(c.id, c); }
+    public void put(Cuenta c) { 
+        cuentas.put(c.id, c); 
+        saldoTotalGlobalCentavos.addAndGet(c.getSaldoCentavos());
+    }
+    
     public Cuenta get(int id) { return cuentas.get(id); }
     public int tamano() { return cuentas.size(); }
 
@@ -44,11 +48,8 @@ public class CuentaRepository {
     public long secuenciaActual() { return secuencia.get(); }
     public RegistroTransacciones registro() { return registro; }
 
-    /** Suma de todos los saldos en centavos (para verificar el invariante). */
     public long saldoTotalCentavos() {
-        long total = 0;
-        for (Cuenta c : cuentas.values()) total += c.getSaldoCentavos();
-        return total;
+        return saldoTotalGlobalCentavos.get();
     }
 
     public enum Estado { OK, MISMA_CUENTA, MONTO_INVALIDO, NO_ENCONTRADA, SALDO_INSUFICIENTE }
@@ -61,7 +62,6 @@ public class CuentaRepository {
         static Resultado ok(long seq) { return new Resultado(Estado.OK, seq); }
     }
 
-    /** Transferencia atomica de origen->destino por montoCentavos. */
     public Resultado transferir(int origenId, int destinoId, long montoCentavos) {
         if (origenId == destinoId) return Resultado.de(Estado.MISMA_CUENTA);
         if (montoCentavos <= 0)    return Resultado.de(Estado.MONTO_INVALIDO);
@@ -94,10 +94,6 @@ public class CuentaRepository {
         }
     }
 
-    /**
-     * Aplica una transaccion replicada del lider (ya validada alla): mueve el
-     * monto, registra la tx y avanza la secuencia local a t.seq().
-     */
     public void aplicarReplica(Transaccion t) {
         Cuenta origen = cuentas.get(t.origenId());
         Cuenta destino = cuentas.get(t.destinoId());
