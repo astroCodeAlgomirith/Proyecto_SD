@@ -110,7 +110,9 @@ private String obtenerToken() throws Exception {
 El mismo subidor sabe listar y bajar objetos. \codigo{contarExistentes()}
 recorre el bucket con paginacion (\codigo{prefix=transactions/} y
 \codigo{nextPageToken}) y devuelve cuantos objetos hay; \codigo{leerTodas()}
-lista y luego descarga cada objeto, parseando a mano los campos simples
+lista y luego descarga cada objeto, reintentando unas pocas veces ante fallos
+transitorios y propagando el error si los agota (una descarga perdida corromperia
+el log al reaplicarse a medias). Parsea a mano los campos simples
 (\codigo{seq}, \codigo{origenId}, \codigo{destinoId}, \codigo{montoCentavos})
 para reconstruir cada \codigo{Transaccion}.
 
@@ -130,14 +132,18 @@ completo sobre el repositorio mediante \codigo{recuperar()}: lee todas las
 transacciones con \codigo{leerTodas()}, las ordena por \codigo{seq} y las
 reaplica en orden con la funcion recibida.
 
-\begin{lstlisting}[language=Java,caption={Reaplicacion ordenada del log durable sobre el repositorio}]
+\begin{lstlisting}[language=Java,caption={Reaplicacion ordenada del log; falla ruidosa si no se puede leer}]
 public long recuperar(Consumer<Transaccion> aplicar) {
     List<Transaccion> txs;
     try {
         txs = new ArrayList<>(subidor.leerTodas());
     } catch (Exception e) {
-        System.err.println("GCS: no se pudo leer el log para recuperar: " + e);
-        return 0;
+        // No degradamos a estado base en silencio: servir el CSV con seq=0
+        // haria que las nuevas tx reutilicen seqs ya usados y corrompan el
+        // log. Fallamos ruidosamente para abortar el arranque.
+        throw new IllegalStateException(
+                "GCS: no se pudo leer el log para recuperar; se aborta el "
+                + "arranque para no servir estado base corrupto", e);
     }
     txs.sort(Comparator.comparingLong(Transaccion::seq));
     for (Transaccion t : txs) aplicar.accept(t);
@@ -147,16 +153,21 @@ public long recuperar(Consumer<Transaccion> aplicar) {
 
 El cableado vive en \codigo{MainServer.iniciarAlmacenGcs()}: primero reaplica el
 log (\codigo{repo::aplicarReplica}), luego arranca el worker con el numero de
-transacciones recuperadas y, por ultimo, engancha el observador para los nuevos
-commits. La funcion \codigo{aplicarReplica} reaplica sin revalidar saldos ni
-reescribir en GCS, de modo que la recuperacion no genera un ciclo de subidas.
+transacciones recuperadas, engancha el observador para los nuevos commits y, por
+ultimo, registra un \emph{shutdown hook} que drena la cola en un apagado ordenado
+(SIGTERM), pues una tx ya ackeada con HTTP 200 puede seguir pendiente de subir y
+se perderia del log si el JVM termina sin vaciar la cola. La funcion
+\codigo{aplicarReplica} reaplica sin revalidar saldos ni reescribir en GCS, de
+modo que la recuperacion no genera un ciclo de subidas.
 
-\begin{lstlisting}[language=Java,caption={Recuperacion antes de servir y enganche del observador (MainServer)}]
+\begin{lstlisting}[language=Java,caption={Recuperacion antes de servir, observador y shutdown hook (MainServer)}]
 long recuperadas = almacen.recuperar(repo::aplicarReplica);
 // ...
 almacen.iniciar(recuperadas);
 repo.setObservador(almacen::registrar);
 repo.setConteoStorage(almacen::escritos);
+// Drena la cola asincrona en un apagado ordenado (SIGTERM).
+Runtime.getRuntime().addShutdownHook(new Thread(() -> almacen.detener()));
 \end{lstlisting}
 
 \begin{advertencia}

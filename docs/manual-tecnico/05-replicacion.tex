@@ -34,9 +34,14 @@ public List<Transaccion> desde(long seq) {
 
 El metodo \codigo{desde(N)} devuelve todas las transacciones con secuencia
 estrictamente mayor a \codigo{N}, ya ordenadas. Esta operacion es la base tanto
-del catch-up de una replica que se reincorpora como del streaming en vivo: en
-ambos casos el orden lo garantiza el log, no el instante en que se hizo el
-\codigo{agregar}.
+del catch-up de una replica que se reincorpora como del streaming en vivo. Para
+que el stream sea contiguo y sin huecos, el orden de insercion en el registro
+debe coincidir con el orden de los \codigo{seq}: eso lo asegura el lider, que en
+\codigo{CuentaRepository.transferir} serializa bajo un \codigo{ReentrantLock}
+interno (\codigo{seqLock}) el tramo que incrementa la secuencia, agrega la
+transaccion al registro y avisa al observador. Asi una transaccion con
+\codigo{seq} mayor nunca aparece en el log antes que una con \codigo{seq} menor,
+aunque varios hilos transfieran a la vez.
 
 \subsection{El lider: catch-up y streaming TCP}
 

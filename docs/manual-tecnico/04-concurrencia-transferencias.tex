@@ -13,11 +13,13 @@ evitar interbloqueos. Los componentes implicados son
 La clase \codigo{Cuenta} guarda el saldo en un \codigo{long} de centavos. El uso
 de aritmetica entera elimina los errores de redondeo del punto flotante, de modo
 que sumas y restas son exactas y el invariante de conservacion del total se
-mantiene al centavo. La conversion a decimal solo ocurre al serializar la salida
-JSON, mediante \codigo{saldoDecimal()}, que escala el entero por $10^{-2}$.
+mantiene al centavo. La salida JSON formatea el saldo directo desde el
+\codigo{long} con \codigo{appendSaldo(StringBuilder)} (sin crear un
+\codigo{BigDecimal} por GET); \codigo{saldoDecimal()} se conserva como conversion
+exacta de respaldo, escalando el entero por $10^{-2}$.
 
 \begin{lstlisting}[language=Java,caption={Saldo entero y conversion exacta en Cuenta.java}]
-private long saldoCentavos;
+private volatile long saldoCentavos;
 
 public long getSaldoCentavos() { return saldoCentavos; }
 public void setSaldoCentavos(long c) { this.saldoCentavos = c; }
@@ -41,20 +43,25 @@ public final ReentrantLock lock = new ReentrantLock();
 \subsection{Estructura concurrente del repositorio}
 
 \codigo{CuentaRepository} es un singleton (\codigo{CuentaRepository.get()}) que
-almacena las cuentas en un \codigo{ConcurrentHashMap} indexado por id. Los
-contadores de progreso usan tipos atomicos: \codigo{AtomicLong secuencia} es el
-numero de secuencia monotono que ordena las transacciones (base de la
-replicacion y del log en GCS), y \codigo{totalTransferencias} cuenta los commits.
-El campo \codigo{ultimaTxId} es \codigo{volatile} para publicar el ultimo seq sin
+almacena las cuentas en un \codigo{ConcurrentHashMap} indexado por id. El
+\codigo{AtomicLong secuencia} es el numero de secuencia monotono que ordena las
+transacciones (base de la replicacion y del log en GCS). El conteo de commits
+\codigo{totalTransferencias} es un \codigo{LongAdder}: en el hot path hace
+\codigo{increment()} sin CAS global (\codigo{sum()} solo lo lee \codigo{/stats}),
+quitando uno de los dos puntos de serializacion global por transferencia. El
+campo \codigo{ultimaTxId} es \codigo{volatile} para publicar el ultimo seq sin
 candado adicional.
 
 \begin{lstlisting}[language=Java,caption={Estado concurrente de CuentaRepository.java}]
 private final ConcurrentHashMap<Integer, Cuenta> cuentas = new ConcurrentHashMap<>();
 
 private final AtomicLong secuencia = new AtomicLong(0);
-private final AtomicLong totalTransferencias = new AtomicLong(0);
+private final LongAdder totalTransferencias = new LongAdder();
 private volatile long ultimaTxId = 0;
 private final RegistroTransacciones registro = new RegistroTransacciones();
+
+// Serializa secuencia+registro.agregar+observador: lock mas interno (sin deadlock).
+private final ReentrantLock seqLock = new ReentrantLock();
 \end{lstlisting}
 
 El invariante de correctitud es que la suma de todos los saldos permanece
@@ -78,8 +85,11 @@ los casos triviales (misma cuenta, monto no positivo) y la ausencia de cualquier
 de las cuentas. Acto seguido aplica la clave anti-deadlock: ordena los dos
 candados por id (el menor primero) de manera que dos hilos que toquen el mismo par
 de cuentas siempre los adquieran en el mismo orden, eliminando la espera
-circular. Bajo ambos candados valida el saldo, mueve el monto, asigna un seq,
-registra la \codigo{Transaccion} y avisa al observador; el bloque \codigo{finally}
+circular. Bajo ambos candados valida el saldo y mueve el monto; luego, dentro de
+un tercer candado \codigo{seqLock} (el mas interno), asigna el seq, registra la
+\codigo{Transaccion} y avisa al observador en un mismo tramo serializado, de modo
+que el orden de insercion en el registro coincida con el orden de seq (evita
+perder transacciones en la replicacion en vivo). El bloque \codigo{finally}
 garantiza la liberacion en orden inverso.
 
 \begin{lstlisting}[language=Java,caption={Bloqueo ordenado y commit en CuentaRepository.java}]
@@ -94,13 +104,19 @@ try {
     }
     origen.setSaldoCentavos(origen.getSaldoCentavos() - montoCentavos);
     destino.setSaldoCentavos(destino.getSaldoCentavos() + montoCentavos);
-    long seq = secuencia.incrementAndGet();
-    totalTransferencias.incrementAndGet();
-    ultimaTxId = seq;
-    Transaccion tx = new Transaccion(seq, origenId, destinoId, montoCentavos);
-    registro.agregar(tx);
-    observador.accept(tx);
-    return Resultado.ok(seq);
+    // Tramo serializado: orden de insercion en registro == orden de seq.
+    seqLock.lock();
+    try {
+        long seq = secuencia.incrementAndGet();
+        totalTransferencias.increment();
+        ultimaTxId = seq;
+        Transaccion tx = new Transaccion(seq, origenId, destinoId, montoCentavos);
+        registro.agregar(tx);
+        observador.accept(tx);
+        return Resultado.ok(seq);
+    } finally {
+        seqLock.unlock();
+    }
 } finally {
     segundo.lock.unlock();
     primero.lock.unlock();
@@ -135,7 +151,7 @@ id para no romper la coherencia frente a transferencias locales concurrentes.
 origen.setSaldoCentavos(origen.getSaldoCentavos() - t.montoCentavos());
 destino.setSaldoCentavos(destino.getSaldoCentavos() + t.montoCentavos());
 registro.agregar(t);
-totalTransferencias.incrementAndGet();
+totalTransferencias.increment();
 ultimaTxId = t.seq();
 secuencia.accumulateAndGet(t.seq(), Math::max);
 \end{lstlisting}

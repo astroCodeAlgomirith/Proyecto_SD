@@ -128,11 +128,18 @@ Uso: GeneradorCarga <host> <puerto> [segundos=60] [enVuelo=512] [clientes=1]
 La progresion de rendimiento medida (banco fijo en una \codigo{e2-standard-4})
 muestra como se fue moviendo el cuello de botella. La primera version sobre
 \codigo{com.sun.net.httpserver} topaba en unas 16,000 ops/s por el dispatcher de
-un solo hilo. Al pasar a un servidor NIO y generar carga desde una
-\codigo{e2-standard-8} se alcanzaron 25,000 a 28,000 ops/s; con NIO y un generador
-\codigo{c3-standard-22} usando 1 \codigo{HttpClient} se llego a unas 60,000 ops/s;
-y con \codigo{c3-standard-22} y K igual a 2 o 3 \codigo{HttpClient} se llego a
-unas 110,000 ops/s, saturando la CPU del banco al 96 a 98\%.
+un solo hilo. Al pasar a un servidor NIO propio se alcanzaron 25,000 a 28,000
+ops/s con un solo generador; con NIO y un generador \codigo{c3-standard-22} usando
+1 \codigo{HttpClient} se llego a unas 60,000 ops/s; y con \codigo{c3-standard-22} y
+K igual a 2 o 3 \codigo{HttpClient} se saturo el banco en unas 110,000 ops/s.
+Sobre ese punto saturado, dos optimizaciones del lado del banco subieron el techo:
+el lote de \emph{allocations} (precomputar campos y armar el JSON sin
+\codigo{BigDecimal} ni \codigo{split}) aporto cerca de un 7\%, y cambiar el
+recolector de basura a \codigo{-XX:+UseParallelGC} con heap fijo de 8 GB y
+\codigo{AlwaysPreTouch} aporto cerca de un 10\%, llegando a un pico de unas 128,000
+ops/s con la CPU del banco al 96 a 98\%. A partir de ahi el banco es CPU-bound en
+la \codigo{e2-standard-4} (techo fisico de la maquina), no por el generador: el
+generador optimo es una \codigo{c3-standard-22} con K igual a 3.
 
 Los numeros oficiales por escenario se midieron en 60 s, con un generador
 \codigo{c3-standard-22} y K igual a 3, en la configuracion de concurso con Cloud
