@@ -49,19 +49,33 @@ devuelve el token; si no, responde \codigo{401}.
 
 \subsection{Formatos JSON de cuentas y transferencias}
 
-\codigo{server/AccountHandler.java} extrae el id de la ruta
-(\codigo{/api/accounts/\{id\}}), consulta el \codigo{CuentaRepository} y arma el
-JSON a mano (sin gson) por ser la ruta caliente. La respuesta lleva
-\codigo{id}, \codigo{propietario} y \codigo{balance}.
+\codigo{server/AccountHandler.java} extrae el id del ultimo segmento de la ruta
+(\codigo{/api/accounts/\{id\}}) sin \codigo{split('/')} (con
+\codigo{Long.parseLong} sobre indices, para no alocar un \codigo{String[]} por
+peticion), consulta el \codigo{CuentaRepository} y arma el JSON a mano (sin
+gson) por ser la ruta caliente. La respuesta lleva \codigo{id},
+\codigo{propietario} y \codigo{balance}. Un id no numerico responde
+\codigo{400}, pero un id numerico fuera de \codigo{[1, Integer.MAX\_VALUE]} es un
+recurso inexistente: responde \codigo{404}.
 
 \begin{lstlisting}[language=Java,caption={Construccion de la respuesta de cuenta}]
-Cuenta c = repo.get(id);
+long idLargo;
+try { idLargo = Long.parseLong(path, ini, fin, 10); }
+catch (NumberFormatException e) { return Respuesta.error(400, "Id invalido"); }
+if (idLargo < 1 || idLargo > Integer.MAX_VALUE) return Respuesta.error(404, "Cuenta no encontrada");
+
+Cuenta c = repo.get((int) idLargo);
 if (c == null) return Respuesta.error(404, "Cuenta no encontrada");
 
-String json = "{\"id\":" + c.id
-        + ",\"propietario\":\"" + c.propietario()
-        + "\",\"balance\":" + c.saldoDecimal().toPlainString() + "}";
-return Respuesta.json(200, json);
+// JSON en un solo StringBuilder: propietario precomputado y saldo desde
+// long (sin BigDecimal), para minimizar allocations por GET.
+StringBuilder sb = new StringBuilder(96);
+sb.append("{\"id\":").append(c.id)
+  .append(",\"propietario\":\"").append(c.propietario)
+  .append("\",\"balance\":");
+c.appendSaldo(sb);
+sb.append('}');
+return Respuesta.json(200, sb.toString());
 \end{lstlisting}
 
 \begin{lstlisting}[language=none,caption={Respuesta de GET /api/accounts/125}]
@@ -157,8 +171,11 @@ token valido en el lider sera rechazado con \codigo{401} en las replicas.
 
 Los manejadores protegidos llaman a \codigo{HttpUtil.usuarioAutenticado()}
 (\codigo{server/HttpUtil.java}) al inicio: si devuelve \codigo{null} responden
-\codigo{401}. El metodo lee el header \codigo{Authorization}, exige el prefijo
-\codigo{Bearer }, recorta el token y verifica la firma con \codigo{JWTUtil}.
+\codigo{401}. El metodo lee el header con la clave en minuscula
+(\codigo{authorization}, ya normalizada por el parser, para no realocar),
+localiza el primer espacio y compara el scheme con \codigo{bearer} de forma
+case-insensitive (RFC 7235), recorta el token con \codigo{trim} y verifica la
+firma con \codigo{JWTUtil}.
 
 Como la validacion HMAC se repite en cada peticion con el mismo token, los
 tokens ya verificados se guardan en un \codigo{ConcurrentHashMap}
@@ -167,9 +184,12 @@ la firma en la ruta caliente.
 
 \begin{lstlisting}[language=Java,caption={Validacion del Bearer con cache en HttpUtil}]
 public static String usuarioAutenticado(Solicitud s) {
-    String auth = s.header("Authorization");
-    if (auth == null || !auth.startsWith("Bearer ")) return null;
-    String token = auth.substring(7);
+    String auth = s.header("authorization");
+    if (auth == null) return null;
+    int sp = auth.indexOf(' ');
+    if (sp < 0) return null;
+    if (!auth.substring(0, sp).equalsIgnoreCase("bearer")) return null;
+    String token = auth.substring(sp + 1).trim();
     String cacheado = TOKENS_VALIDOS.get(token);
     if (cacheado != null) return cacheado;
     try {

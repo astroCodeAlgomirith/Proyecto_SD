@@ -231,21 +231,25 @@ public interface Manejador {
 
 Finalmente, \codigo{server/http/Ruteador.java} replica el \emph{longest-prefix} de
 \codigo{HttpServer.createContext}: \codigo{registrar()} asocia un prefijo de path
-a un \codigo{Manejador} y a la marca \codigo{INLINE} o \codigo{WORKER}, y
-\codigo{resolver()} devuelve la ruta cuyo prefijo, siendo prefijo del path, sea el
-mas largo. La validacion del verbo HTTP (responder 405) queda en cada handler;
-aqui solo se rutea por path.
+a un \codigo{Manejador} y a la marca \codigo{INLINE} o \codigo{WORKER}, y al
+registrar mantiene la tabla ordenada por prefijo mas largo primero. Asi
+\codigo{resolver()} solo barre las entradas en ese orden y devuelve el
+\textbf{primer} prefijo que sea prefijo del path, que por construccion es el mas
+largo; ese corte temprano abarata el camino caliente. La validacion del verbo
+HTTP (responder 405) queda en cada handler; aqui solo se rutea por path.
 
-\begin{lstlisting}[language=Java,caption={Resolucion por prefijo mas largo}]
+\begin{lstlisting}[language=Java,caption={Orden en registrar() y primer match en resolver()}]
+public Ruteador registrar(String prefijo, Manejador m, boolean worker) {
+    entradas.add(new Entrada(prefijo, new Ruta(m, worker)));
+    // Prefijo mas largo primero (una vez, en el arranque).
+    entradas.sort((a, b) -> b.prefijo.length() - a.prefijo.length());
+    return this;
+}
+
 public Ruta resolver(String path) {
-    Ruta mejor = null;
-    int largo = -1;
     for (Entrada e : entradas) {
-        if (path.startsWith(e.prefijo) && e.prefijo.length() > largo) {
-            mejor = e.ruta;
-            largo = e.prefijo.length();
-        }
+        if (path.startsWith(e.prefijo)) return e.ruta; // ya ordenadas desc
     }
-    return mejor;
+    return null;
 }
 \end{lstlisting}

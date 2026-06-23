@@ -81,7 +81,7 @@ saldo se ofrece como decimal exacto solo al construir el JSON de salida, via
 \codigo{BigDecimal}.
 
 \begin{lstlisting}[language=Java,caption={Saldo en centavos y conversion a decimal exacto (Cuenta.java)}]
-private long saldoCentavos;
+private volatile long saldoCentavos;
 
 // Lock por cuenta para transferencias concurrentes (se toma en orden de id).
 public final ReentrantLock lock = new ReentrantLock();

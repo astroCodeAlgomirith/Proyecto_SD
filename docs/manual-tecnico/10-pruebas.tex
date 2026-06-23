@@ -63,7 +63,7 @@ java -cp "target/banco.jar:target/test-classes" pruebas.TestRunner
 \end{lstlisting}
 
 \begin{nota}
-En total las ocho suites suman \textbf{68 aserciones} verdes. El conteo final lo
+En total las diez suites suman \textbf{92 aserciones} verdes. El conteo final lo
 imprime el propio \codigo{TestRunner} y, mientras todas pasen, el script termina
 con codigo de salida 0.
 \end{nota}
@@ -74,12 +74,15 @@ Las suites van de la logica de dominio aislada hasta los componentes
 distribuidos ejercitados con red real. Cada una se cita por su archivo fuente.
 
 \begin{itemize}
-\item \codigo{pruebas/CuentaRepositoryTest.java} (13 aserciones): valida la
+\item \codigo{pruebas/CuentaRepositoryTest.java} (15 aserciones): valida la
 transferencia basica en centavos, los casos borde (\codigo{MISMA\_CUENTA},
 \codigo{MONTO\_INVALIDO}, \codigo{NO\_ENCONTRADA}, \codigo{SALDO\_INSUFICIENTE})
 y, sobre todo, la invariante de conservacion del dinero lanzando 8 hilos con
 5000 operaciones cada uno (40 mil transferencias concurrentes) y comprobando que
-\codigo{saldoTotalCentavos()} no cambia.
+\codigo{saldoTotalCentavos()} no cambia. Tambien comprueba que ese metodo
+\emph{recalcula} la suma real recorriendo las cuentas: tras mover un saldo fuera
+de una transferencia que conserva, \codigo{saldoTotalCentavos()} detecta el
+descuadre, algo que un contador cacheado no podria reportar.
 
 \item \codigo{pruebas/AlumnosLoaderTest.java} (7 aserciones): carga un CSV
 temporal con \codigo{AlumnosLoader.cargar()} y verifica el numero de filas, la
@@ -97,6 +100,15 @@ convergencia pero con \emph{sockets reales}. Levanta \codigo{ServidorReplicacion
 en un puerto efimero y un \codigo{ClienteReplicacion} que se conecta por TCP a
 \codigo{127.0.0.1}; valida el catch-up inicial y que el \emph{streaming} en vivo
 propague nuevas transferencias.
+
+\item \codigo{pruebas/ReplicacionMultiWriterTest.java} (4 aserciones): estresa la
+replicacion con 8 hilos escribiendo miles de transferencias sobre pares
+disjuntos en un repo lider, mientras un lector drena el log con
+\codigo{registro().desde(enviado)} y lo reaplica en una replica. Al final exige
+no solo la suma global conservada en ambos repos, sino la igualdad de saldo
+\emph{por cuenta} lider == replica para todas las cuentas; sin la serializacion
+del par seq+log bajo \codigo{seqLock} el lector se saltaria una secuencia aun no
+insertada y la replica divergiria.
 
 \item \codigo{pruebas/GeneradorCargaTest.java} (5 aserciones): corre el
 \codigo{GeneradorCarga} unos 2 segundos contra un nodo HTTP real en proceso
@@ -122,6 +134,17 @@ en un mismo segmento TCP, body partido en dos segmentos, respuesta 405 con
 \codigo{Content-Length: 0} que no rompe la conexion, query string ignorada,
 header \codigo{Authorization} sin distincion de mayusculas y ausencia de
 autorizacion (401).
+
+\item \codigo{pruebas/HandlersErroresTest.java} (18 aserciones): ejercita los
+manejadores \emph{in-process} (construye una \codigo{Solicitud} a mano, sin
+socket) para fijar los codigos de error. Cubre el cuerpo de \codigo{/transfer}
+(JSON malo, campos faltantes, monto no numerico, misma cuenta, monto cero o
+negativo y saldo insuficiente devuelven 400; cuenta inexistente, 404; la
+transferencia valida, 200); el header \codigo{Authorization} tolerante con el
+scheme \codigo{Bearer} sin distincion de mayusculas y con espacios extra
+(\codigo{bearer x}, \codigo{BEARER x}, \codigo{Bearer\ \ x} dan 200, y sin scheme
+o con token roto, 401); y el GET de un id numerico fuera del rango \codigo{int} o
+inexistente, que devuelve 404 (no 400).
 \end{itemize}
 
 \begin{lstlisting}[language=Java,caption={ParserHttpTest: dos requests en una sola conexion keep-alive sobre socket crudo}]
