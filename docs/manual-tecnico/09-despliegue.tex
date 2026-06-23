@@ -74,13 +74,24 @@ After=network-online.target
 
 [Service]
 EnvironmentFile=/etc/banco.env
-ExecStart=/usr/bin/java -jar /opt/banco/banco.jar 8080
+ExecStart=/usr/bin/java -XX:+UseParallelGC -Xms8g -Xmx8g -XX:+AlwaysPreTouch -jar /opt/banco/banco.jar 8080
 Restart=always
 RestartSec=2
 
 [Install]
 WantedBy=multi-user.target
 \end{lstlisting}
+
+\begin{nota}
+Los \emph{flags} de JVM del \codigo{ExecStart} suben el throughput del lider
+$\sim$10\% bajo saturacion (medido A/B con generador co-locado): en una rafaga
+CPU-bound de 60s, \codigo{ParallelGC} evita el marcado concurrente de G1 que
+roba CPU, y \codigo{-Xms8g -Xmx8g -XX:+AlwaysPreTouch} fija el heap y toca las
+paginas al arrancar para no pagar resize ni fallos de pagina en caliente. El
+heap de 8\,GB es \textbf{solo para el lider} (e2-standard-4, 16\,GB de RAM); las
+replicas (e2-standard-2, 8\,GB) deben omitir \codigo{-Xmx8g} o usar un valor
+menor.
+\end{nota}
 
 \begin{nota}
 Re-desplegar una version nueva no requiere SSH: basta con volver a subir
