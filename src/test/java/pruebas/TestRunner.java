@@ -14,6 +14,8 @@ public final class TestRunner {
         ReplicacionTest.run();
         System.out.println("== ReplicacionTcpTest ==");
         ReplicacionTcpTest.run();
+        System.out.println("== ReplicacionMultiWriterTest ==");
+        ReplicacionMultiWriterTest.run();
         System.out.println("== GeneradorCargaTest ==");
         GeneradorCargaTest.run();
         System.out.println("== PanelTest ==");
@@ -22,6 +24,8 @@ public final class TestRunner {
         AlmacenGcsTest.run();
         System.out.println("== ParserHttpTest ==");
         ParserHttpTest.run();
+        System.out.println("== HandlersErroresTest ==");
+        HandlersErroresTest.run();
         System.out.printf("%nResultado: %d pasadas, %d fallidas%n",
                 MiniTest.pasadas(), MiniTest.fallidas());
         if (MiniTest.fallidas() > 0) System.exit(1);
