@@ -12,6 +12,22 @@ public final class CuentaRepositoryTest {
         transferenciaBasica();
         casosBorde();
         invarianteBajoConcurrencia();
+        detectaDescuadre();
+    }
+
+    // saldoTotalCentavos() debe RECALCULAR desde los saldos reales para poder
+    // detectar un descuadre; un contador incremental se "conserva" solo y vuelve
+    // tautologica la verificacion del invariante que pide el PDF.
+    private static void detectaDescuadre() {
+        CuentaRepository repo = new CuentaRepository();
+        repo.put(new Cuenta(1, "A", "A", "A", 50000));
+        repo.put(new Cuenta(2, "B", "B", "B", 50000));
+        MiniTest.eq(100000L, repo.saldoTotalCentavos(), "total inicial real");
+        // Descuadre fuera de una transferencia que conserva: corrupcion, replica
+        // mal aplicada o escritura parcial mueven un saldo sin su contraparte.
+        repo.get(1).setSaldoCentavos(repo.get(1).getSaldoCentavos() - 10000);
+        MiniTest.eq(90000L, repo.saldoTotalCentavos(),
+                "saldoTotalCentavos detecta el descuadre (suma real, no contador cacheado)");
     }
 
     private static void transferenciaBasica() {
