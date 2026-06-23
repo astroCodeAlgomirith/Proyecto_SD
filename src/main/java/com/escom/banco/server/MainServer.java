@@ -86,6 +86,10 @@ public class MainServer {
         almacen.iniciar(recuperadas);
         repo.setObservador(almacen::registrar);
         repo.setConteoStorage(almacen::escritos);
+        // Drena la cola asincrona en un apagado ordenado (SIGTERM): una tx ya
+        // ackeada (HTTP 200) puede seguir pendiente de subir a GCS y se perderia
+        // del log durable si el JVM termina sin vaciar la cola.
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> almacen.detener()));
         System.out.println("Log durable en GCS: bucket " + bucket);
     }
 

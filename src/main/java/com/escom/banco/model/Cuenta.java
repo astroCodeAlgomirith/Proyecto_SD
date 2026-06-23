@@ -16,7 +16,7 @@ public class Cuenta {
     // Precomputado al cargar (campos inmutables): evita reconcatenar en cada GET.
     public final String propietario;
 
-    private long saldoCentavos;
+    private volatile long saldoCentavos;
 
     // Lock por cuenta para transferencias concurrentes (se toma en orden de id).
     public final ReentrantLock lock = new ReentrantLock();

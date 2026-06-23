@@ -24,6 +24,9 @@ public final class GcsSubidor implements AlmacenGcs.Subidor {
     private static final String META_TOKEN =
             "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token";
 
+    /** Intentos por objeto al descargar el log durante la recuperacion. */
+    private static final int INTENTOS_DESCARGA = 3;
+
     private final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5)).build();
     private final String bucket;
@@ -85,12 +88,35 @@ public final class GcsSubidor implements AlmacenGcs.Subidor {
             if (j.has("items")) {
                 for (var item : j.getAsJsonArray("items")) {
                     String nombre = item.getAsJsonObject().get("name").getAsString();
-                    txs.add(descargar(nombre));
+                    txs.add(descargarConReintentos(nombre));
                 }
             }
             pageToken = j.has("nextPageToken") ? j.get("nextPageToken").getAsString() : null;
         } while (pageToken != null);
         return txs;
+    }
+
+    /**
+     * Baja un objeto del log reintentando unas pocas veces ante fallos
+     * transitorios (red, 5xx). Si agota los intentos relanza la ultima
+     * excepcion: una descarga perdida corrompe el log si se reaplica a medias,
+     * asi que el fallo debe propagarse y no tragarse aqui.
+     */
+    private Transaccion descargarConReintentos(String nombre) throws Exception {
+        Exception ultima = null;
+        for (int i = 0; i < INTENTOS_DESCARGA; i++) {
+            try {
+                return descargar(nombre);
+            } catch (Exception e) {
+                ultima = e;
+                try { Thread.sleep(100L * (i + 1)); }
+                catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw e;
+                }
+            }
+        }
+        throw new Exception("GCS: no se pudo descargar el objeto del log: " + nombre, ultima);
     }
 
     /** Baja un objeto del log y lo parsea a mano (campos simples: ints y longs). */
@@ -100,7 +126,11 @@ public final class GcsSubidor implements AlmacenGcs.Subidor {
         HttpRequest req = HttpRequest.newBuilder(URI.create(url))
                 .header("Authorization", "Bearer " + obtenerToken())
                 .timeout(Duration.ofSeconds(10)).GET().build();
-        JsonObject j = Json.parse(http.send(req, BodyHandlers.ofString()).body());
+        var resp = http.send(req, BodyHandlers.ofString());
+        if (resp.statusCode() < 200 || resp.statusCode() >= 300) {
+            throw new Exception("GCS: HTTP " + resp.statusCode() + " al descargar " + nombre);
+        }
+        JsonObject j = Json.parse(resp.body());
         return new Transaccion(
                 j.get("seq").getAsLong(),
                 j.get("origenId").getAsInt(),

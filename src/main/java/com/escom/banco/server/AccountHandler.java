@@ -29,11 +29,14 @@ public class AccountHandler implements Manejador {
         if (fin < 0) fin = path.length();
         if (ini >= fin) return Respuesta.error(400, "Falta el id");
 
-        int id;
-        try { id = Integer.parseInt(path, ini, fin, 10); }
+        // Long valida la SINTAXIS (no numerico -> 400). Un id numerico pero fuera
+        // de [1, Integer.MAX_VALUE] es un recurso inexistente -> 404, no 400.
+        long idLargo;
+        try { idLargo = Long.parseLong(path, ini, fin, 10); }
         catch (NumberFormatException e) { return Respuesta.error(400, "Id invalido"); }
+        if (idLargo < 1 || idLargo > Integer.MAX_VALUE) return Respuesta.error(404, "Cuenta no encontrada");
 
-        Cuenta c = repo.get(id);
+        Cuenta c = repo.get((int) idLargo);
         if (c == null) return Respuesta.error(404, "Cuenta no encontrada");
 
         // JSON en un solo StringBuilder: propietario precomputado y saldo desde

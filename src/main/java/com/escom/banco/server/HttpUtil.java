@@ -23,8 +23,13 @@ public final class HttpUtil {
         // Clave en minuscula: el parser ya normaliza, y asi header() no aloca
         // (toLowerCase sobre texto ya en minusculas devuelve la misma instancia).
         String auth = s.header("authorization");
-        if (auth == null || !auth.startsWith("Bearer ")) return null;
-        String token = auth.substring(7);
+        if (auth == null) return null;
+        // RFC 7235: el scheme es case-insensitive. Localizar el primer espacio,
+        // comparar el scheme con "bearer" y tomar el resto (con trim) como token.
+        int sp = auth.indexOf(' ');
+        if (sp < 0) return null;
+        if (!auth.substring(0, sp).equalsIgnoreCase("bearer")) return null;
+        String token = auth.substring(sp + 1).trim();
         String cacheado = TOKENS_VALIDOS.get(token);
         if (cacheado != null) return cacheado;
         try {

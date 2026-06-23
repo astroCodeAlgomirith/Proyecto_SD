@@ -61,8 +61,13 @@ public final class AlmacenGcs {
         try {
             txs = new ArrayList<>(subidor.leerTodas());
         } catch (Exception e) {
-            System.err.println("GCS: no se pudo leer el log para recuperar: " + e);
-            return 0;
+            // No degradamos a estado base en silencio: servir el CSV con
+            // secuencia=0 haria que las nuevas tx reutilicen seqs ya usados y
+            // corrompan el log durable. Fallamos ruidosamente para que el
+            // arranque aborte y el nodo no sirva un estado falso.
+            throw new IllegalStateException(
+                    "GCS: no se pudo leer el log para recuperar; se aborta el "
+                    + "arranque para no servir estado base corrupto", e);
         }
         txs.sort(Comparator.comparingLong(Transaccion::seq));
         for (Transaccion t : txs) aplicar.accept(t);

@@ -30,6 +30,12 @@ public class CuentaRepository {
     private volatile long ultimaTxId = 0;
     private final RegistroTransacciones registro = new RegistroTransacciones();
 
+    // Serializa el tramo secuencia+log+observador para que el orden de
+    // insercion en el registro == orden de seq. Es el lock mas interno
+    // (se toma despues de los locks de par y se libera antes) -> sin deadlock.
+    private final java.util.concurrent.locks.ReentrantLock seqLock =
+            new java.util.concurrent.locks.ReentrantLock();
+
     // Observador del log durable (lo pone el lider): se le avisa cada commit.
     private volatile Consumer<Transaccion> observador = t -> {};
     // Conteo de tx en el log durable (Cloud Storage); -1 = deshabilitado.
@@ -85,13 +91,19 @@ public class CuentaRepository {
             }
             origen.setSaldoCentavos(origen.getSaldoCentavos() - montoCentavos);
             destino.setSaldoCentavos(destino.getSaldoCentavos() + montoCentavos);
-            long seq = secuencia.incrementAndGet();
-            totalTransferencias.increment();
-            ultimaTxId = seq;
-            Transaccion tx = new Transaccion(seq, origenId, destinoId, montoCentavos);
-            registro.agregar(tx);
-            observador.accept(tx);
-            return Resultado.ok(seq);
+            // Tramo serializado: garantiza orden de insercion en registro == orden de seq.
+            seqLock.lock();
+            try {
+                long seq = secuencia.incrementAndGet();
+                totalTransferencias.increment();
+                ultimaTxId = seq;
+                Transaccion tx = new Transaccion(seq, origenId, destinoId, montoCentavos);
+                registro.agregar(tx);
+                observador.accept(tx);
+                return Resultado.ok(seq);
+            } finally {
+                seqLock.unlock();
+            }
         } finally {
             segundo.lock.unlock();
             primero.lock.unlock();
