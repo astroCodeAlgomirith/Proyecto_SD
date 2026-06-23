@@ -19,6 +19,15 @@ final class Conexion {
     private static final int INICIAL = 8 * 1024;
     private static final int MAX = 2 * 1024 * 1024;
 
+    // Fragmentos fijos de la cabecera 200 OK + JSON (el 100% de las respuestas
+    // exitosas): pre-codificados una vez para no rearmar/getBytes la cabecera por
+    // respuesta. Solo el Content-Length se formatea por respuesta.
+    private static final byte[] PRE_200_JSON =
+            ("HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=UTF-8\r\n"
+                    + "Content-Length: ").getBytes(StandardCharsets.ISO_8859_1);
+    private static final byte[] FIN_CABECERAS = "\r\n\r\n".getBytes(StandardCharsets.ISO_8859_1);
+    private static final String CT_JSON = "application/json; charset=UTF-8";
+
     final SocketChannel canal;
     byte[] buf = new byte[INICIAL];
     int len = 0;
@@ -53,6 +62,18 @@ final class Conexion {
 
     /** Serializa la respuesta a un ByteBuffer (status line + headers + body). */
     static ByteBuffer serializar(Respuesta r, boolean cerrar) {
+        // Camino caliente (200 OK + JSON, keep-alive): cabecera con fragmentos
+        // pre-codificados; solo se formatea el Content-Length. Byte-identico al
+        // camino general. El resto (201, 4xx, 5xx, html, cerrar) usa StringBuilder.
+        if (r.codigo == 200 && !cerrar && CT_JSON.equals(r.contentType)) {
+            byte[] cl = Integer.toString(r.cuerpo.length).getBytes(StandardCharsets.ISO_8859_1);
+            ByteBuffer bb = ByteBuffer.allocate(
+                    PRE_200_JSON.length + cl.length + FIN_CABECERAS.length + r.cuerpo.length);
+            bb.put(PRE_200_JSON).put(cl).put(FIN_CABECERAS);
+            if (r.cuerpo.length > 0) bb.put(r.cuerpo);
+            bb.flip();
+            return bb;
+        }
         StringBuilder sb = new StringBuilder(96);
         sb.append("HTTP/1.1 ").append(r.codigo).append(' ').append(razon(r.codigo)).append("\r\n");
         if (r.contentType != null) sb.append("Content-Type: ").append(r.contentType).append("\r\n");

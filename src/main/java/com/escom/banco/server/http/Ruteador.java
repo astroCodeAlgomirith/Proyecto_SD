@@ -33,19 +33,17 @@ public final class Ruteador {
     /** Registra un handler para un prefijo de path. worker=true lo manda al pool. */
     public Ruteador registrar(String prefijo, Manejador m, boolean worker) {
         entradas.add(new Entrada(prefijo, new Ruta(m, worker)));
+        // Orden por prefijo mas largo primero (una vez, en el arranque) para que
+        // resolver() devuelva el primer match y corte el barrido en el hot path.
+        entradas.sort((a, b) -> b.prefijo.length() - a.prefijo.length());
         return this;
     }
 
     /** Devuelve la ruta del prefijo mas largo que sea prefijo del path; null si ninguna. */
     public Ruta resolver(String path) {
-        Ruta mejor = null;
-        int largo = -1;
         for (Entrada e : entradas) {
-            if (path.startsWith(e.prefijo) && e.prefijo.length() > largo) {
-                mejor = e.ruta;
-                largo = e.prefijo.length();
-            }
+            if (path.startsWith(e.prefijo)) return e.ruta;  // entradas ya ordenadas desc
         }
-        return mejor;
+        return null;
     }
 }

@@ -13,6 +13,8 @@ public class Cuenta {
     public final String nombre;
     public final String apellido1;
     public final String apellido2;
+    // Precomputado al cargar (campos inmutables): evita reconcatenar en cada GET.
+    public final String propietario;
 
     private long saldoCentavos;
 
@@ -24,19 +26,34 @@ public class Cuenta {
         this.nombre = nombre;
         this.apellido1 = apellido1;
         this.apellido2 = apellido2;
+        this.propietario = nombre + " " + apellido1 + " " + apellido2;
         this.saldoCentavos = saldoCentavos;
     }
 
     public long getSaldoCentavos() { return saldoCentavos; }
     public void setSaldoCentavos(long c) { this.saldoCentavos = c; }
 
-    /** "NOMBRE APELLIDO1 APELLIDO2" tal como lo espera el campo propietario. */
+    /** "NOMBRE APELLIDO1 APELLIDO2"; precomputado en el constructor. */
     public String propietario() {
-        return nombre + " " + apellido1 + " " + apellido2;
+        return propietario;
     }
 
     /** Saldo como decimal exacto (centavos / 100) para el JSON de salida. */
     public BigDecimal saldoDecimal() {
         return BigDecimal.valueOf(saldoCentavos, 2);
+    }
+
+    /**
+     * Anexa el saldo "entero.dd" directo desde centavos long, byte-identico a
+     * saldoDecimal().toPlainString() para saldo >= 0 (lo garantiza el invariante:
+     * transferir() rechaza dejar saldos negativos). Evita crear un BigDecimal por GET.
+     */
+    public void appendSaldo(StringBuilder sb) {
+        long c = saldoCentavos;
+        if (c < 0) { sb.append(saldoDecimal().toPlainString()); return; }
+        sb.append(c / 100).append('.');
+        long cent = c % 100;
+        if (cent < 10) sb.append('0');
+        sb.append(cent);
     }
 }

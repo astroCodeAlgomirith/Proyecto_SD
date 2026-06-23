@@ -20,7 +20,9 @@ public final class HttpUtil {
      * trae un JWT valido; null en cualquier otro caso (-> responder 401).
      */
     public static String usuarioAutenticado(Solicitud s) {
-        String auth = s.header("Authorization");
+        // Clave en minuscula: el parser ya normaliza, y asi header() no aloca
+        // (toLowerCase sobre texto ya en minusculas devuelve la misma instancia).
+        String auth = s.header("authorization");
         if (auth == null || !auth.startsWith("Bearer ")) return null;
         String token = auth.substring(7);
         String cacheado = TOKENS_VALIDOS.get(token);
