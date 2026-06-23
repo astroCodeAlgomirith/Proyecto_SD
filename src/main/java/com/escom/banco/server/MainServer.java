@@ -35,8 +35,7 @@ public class MainServer {
         server.createContext("/api/login", authHandler);
         server.createContext("/api/accounts", new AccountHandler());
         server.createContext("/api/transactions/transfer", new TransferHandler());
-        server.setExecutor(Executors.newFixedThreadPool(
-                Runtime.getRuntime().availableProcessors() * 2));
+        server.setExecutor(Executors.newCachedThreadPool());
         server.start();
 
         System.out.println("Nodo del banco escuchando en http://0.0.0.0:" + puerto);
