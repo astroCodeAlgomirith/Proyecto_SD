@@ -33,15 +33,25 @@ public final class PuntoControl {
 
     /** "BPC1" en ASCII: marca de formato para descartar archivos ajenos. */
     private static final int MAGIA = 0x42504331;
+    /** Tope defensivo del conteo de cuentas para no asignar arreglos absurdos
+     *  ante un archivo corrupto (el dataset real son ~820k cuentas). */
+    private static final int LIMITE_CUENTAS = 50_000_000;
 
     private final Path archivo;
     private final long periodoMs;
+    // Excluye apply (hilo de replicacion) de la COPIA del snapshot.
     private final Object candado = new Object();
+    // Serializa los VOLCADOS a disco: el hilo timer y el shutdown hook nunca
+    // escriben el archivo a la vez (evita un .tmp entrelazado en SIGTERM).
+    private final Object lockDisco = new Object();
     private volatile boolean activo = false;
 
     public PuntoControl(Path archivo, long periodoSeg) {
         this.archivo = archivo;
-        this.periodoMs = Math.max(1L, periodoSeg) * 1000L;
+        // Acota ambos extremos: un periodo 0 o un overflow de *1000 (sleep
+        // negativo -> IllegalArgumentException) mataria el hilo de snapshots.
+        long seg = Math.max(1L, Math.min(periodoSeg, 86_400L));
+        this.periodoMs = seg * 1000L;
     }
 
     /**
@@ -52,27 +62,42 @@ public final class PuntoControl {
      */
     public long cargar(CuentaRepository repo) {
         if (!Files.exists(archivo)) return -1;
+        long seq;
+        int[] ids;
+        long[] saldos;
+        // Se parsea TODO el archivo a buffers temporales ANTES de tocar el repo:
+        // un cuerpo truncado (cabecera valida + body a medias) revienta aqui sin
+        // dejar el repo mitad-CSV/mitad-checkpoint (lo que con RESUME 0 daria
+        // saldos corruptos en silencio). Si algo falla, el repo queda intacto.
         try (DataInputStream in = new DataInputStream(
                 new BufferedInputStream(Files.newInputStream(archivo)))) {
             if (in.readInt() != MAGIA) {
                 System.err.println("Punto de control: formato invalido, se ignora.");
                 return -1;
             }
-            long seq = in.readLong();
+            seq = in.readLong();
             int count = in.readInt();
-            for (int i = 0; i < count; i++) {
-                int id = in.readInt();
-                long saldo = in.readLong();
-                Cuenta c = repo.get(id);
-                if (c != null) c.setSaldoCentavos(saldo);
+            if (count < 0 || count > LIMITE_CUENTAS) {
+                System.err.println("Punto de control: conteo invalido (" + count + "), se ignora.");
+                return -1;
             }
-            repo.restaurarSecuencia(seq);
-            return seq;
+            ids = new int[count];
+            saldos = new long[count];
+            for (int i = 0; i < count; i++) {
+                ids[i] = in.readInt();
+                saldos[i] = in.readLong();
+            }
         } catch (IOException | RuntimeException e) {
             System.err.println("Punto de control: no se pudo cargar (" + e.getMessage()
                     + "); se arranca desde el CSV.");
             return -1;
         }
+        for (int i = 0; i < ids.length; i++) {
+            Cuenta c = repo.get(ids[i]);
+            if (c != null) c.setSaldoCentavos(saldos[i]);
+        }
+        repo.restaurarSecuencia(seq);
+        return seq;
     }
 
     /**
@@ -116,11 +141,15 @@ public final class PuntoControl {
     }
 
     private void guardar(CuentaRepository repo) {
-        byte[] datos;
-        synchronized (candado) {
-            datos = serializar(repo);
+        // lockDisco serializa los volcados: timer y shutdown hook no escriben el
+        // mismo .tmp a la vez. La copia en memoria va bajo 'candado' (sin IO).
+        synchronized (lockDisco) {
+            byte[] datos;
+            synchronized (candado) {
+                datos = serializar(repo);
+            }
+            escribir(datos);
         }
-        escribir(datos);
     }
 
     /**

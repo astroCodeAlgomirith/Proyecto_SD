@@ -64,9 +64,15 @@ public class ClienteReplicacion {
                 PuntoControl pc = this.puntoControl;
                 String linea;
                 while (activo && (linea = in.readLine()) != null) {
-                    Transaccion tx = CodecTransaccion.deLinea(linea);
-                    if (pc != null) pc.aplicar(repo, tx);
-                    else repo.aplicarReplica(tx);
+                    try {
+                        Transaccion tx = CodecTransaccion.deLinea(linea);
+                        if (pc != null) pc.aplicar(repo, tx);
+                        else repo.aplicarReplica(tx);
+                    } catch (RuntimeException ex) {
+                        // Linea mal formada (p.ej. corte de conexion a media linea):
+                        // no debe matar el hilo; se corta y se reconecta con RESUME.
+                        break;
+                    }
                 }
             } catch (IOException e) {
                 // lider no disponible: se reintenta abajo

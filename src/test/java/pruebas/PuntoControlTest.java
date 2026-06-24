@@ -20,6 +20,7 @@ public final class PuntoControlTest {
         roundTrip();
         sinArchivo();
         archivoCorrupto();
+        archivoTruncado();
         resumeE2E();
     }
 
@@ -62,6 +63,30 @@ public final class PuntoControlTest {
         PuntoControl pc = new PuntoControl(f, 60);
         long cargada = pc.cargar(b);
         MiniTest.eq(-1, cargada, "checkpoint corrupto devuelve -1 (fallback a CSV)");
+        Files.deleteIfExists(f);
+    }
+
+    // 3b. cabecera valida + cuerpo TRUNCADO -> -1 y el repo queda INTACTO (CSV),
+    //     no mitad-CSV/mitad-checkpoint (que con RESUME 0 daria saldos corruptos).
+    private static void archivoTruncado() throws Exception {
+        Path f = tmp("pc-trunc");
+        CuentaRepository origen = repo(6, 100000);
+        Random r = new Random(3);
+        for (int k = 0; k < 20; k++) origen.transferir(1 + r.nextInt(6), 1 + r.nextInt(6), 50);
+        new PuntoControl(f, 60).guardarFinal(origen);
+        byte[] full = Files.readAllBytes(f);
+        // Corta a la mitad: deja cabecera (16 B) valida pero el cuerpo a medias.
+        Files.write(f, java.util.Arrays.copyOf(full, full.length / 2));
+
+        CuentaRepository b = repo(6, 100000); // base CSV: todos en 100000
+        long cargada = new PuntoControl(f, 60).cargar(b);
+        MiniTest.eq(-1, cargada, "checkpoint truncado devuelve -1");
+        MiniTest.eq(0, b.secuenciaActual(), "secuencia intacta tras checkpoint truncado");
+        boolean intacto = true;
+        for (int i = 1; i <= 6; i++) {
+            if (b.get(i).getSaldoCentavos() != 100000) intacto = false;
+        }
+        MiniTest.check(intacto, "saldos intactos (base CSV) tras checkpoint truncado");
         Files.deleteIfExists(f);
     }
 
