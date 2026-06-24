@@ -22,6 +22,7 @@ public final class PuntoControlTest {
         archivoCorrupto();
         archivoTruncado();
         resumeE2E();
+        resetSiAdelantada();
     }
 
     // 1. guardar -> cargar restaura saldos, secuencia y total de transferencias.
@@ -138,6 +139,41 @@ public final class PuntoControlTest {
         cliente2.detener();
         servidor.detener();
         Files.deleteIfExists(f);
+    }
+
+    // 5. Caida TOTAL: la replica viene de un checkpoint MAS NUEVO que el estado
+    //    del lider (que se recupero del log GCS rezagado y "retrocedio" a G). El
+    //    lider ordena RESET y la replica reconstruye la base + RESUME 0 -> converge
+    //    al lider en vez de quedar adelantada/divergente.
+    private static void resetSiAdelantada() throws Exception {
+        CuentaRepository lider = repo(8, 100000);
+        Random r = new Random(13);
+        transferir(lider, r, 40); // lider en seq G
+        long g = lider.secuenciaActual();
+        MiniTest.check(g > 0, "el lider quedo en una seq G > 0");
+
+        ServidorReplicacion servidor = new ServidorReplicacion(lider, 0);
+        servidor.iniciar();
+
+        // Replica "adelantada": simula un checkpoint en una seq mayor que G, con
+        // un saldo distinto de la base para detectar que se recarga.
+        CuentaRepository replica = repo(8, 100000);
+        replica.get(1).setSaldoCentavos(999);
+        replica.restaurarSecuencia(g + 100);
+
+        ClienteReplicacion cliente = new ClienteReplicacion(replica, "127.0.0.1", servidor.getPuerto());
+        cliente.setAlResetear(() -> { // simula recargar el CSV (base 100000)
+            for (int i = 1; i <= 8; i++) replica.get(i).setSaldoCentavos(100000);
+            replica.restaurarSecuencia(0);
+        });
+        cliente.iniciar();
+
+        boolean convergio = esperar(
+                () -> replica.secuenciaActual() == g && mismosSaldos(lider, replica, 8), 3000);
+        MiniTest.check(convergio, "replica adelantada: RESET -> recarga base -> converge al lider");
+
+        cliente.detener();
+        servidor.detener();
     }
 
     private static Path tmp(String prefijo) throws Exception {

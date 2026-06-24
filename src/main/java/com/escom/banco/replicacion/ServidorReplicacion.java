@@ -68,6 +68,15 @@ public class ServidorReplicacion {
                      new OutputStreamWriter(sock.getOutputStream(), StandardCharsets.UTF_8))) {
 
             long enviado = leerResume(in.readLine());   // "RESUME N"
+            // Si la replica pide reanudar MAS ADELANTE del estado actual del lider,
+            // su checkpoint quedo adelantado: es el caso de caida TOTAL, donde el
+            // lider se recupero del log GCS (rezagado) y "retrocedio" a una seq
+            // menor. Su estado seria inconsistente -> ordenarle reconstruir la base.
+            if (enviado > repo.secuenciaActual()) {
+                out.write("RESET\n");
+                out.flush();
+                return;
+            }
             while (activo && !sock.isClosed()) {
                 List<Transaccion> nuevas = repo.registro().desde(enviado);
                 if (nuevas.isEmpty()) {

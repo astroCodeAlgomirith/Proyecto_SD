@@ -24,6 +24,7 @@ public class MainServer {
         }
 
         Path csv = Path.of(System.getenv().getOrDefault("ALUMNOS_CSV", "alumnos.csv"));
+        csvPath = csv;
         System.out.println("Cargando cuentas desde " + csv.toAbsolutePath() + " ...");
         long t0 = System.nanoTime();
         int n = AlumnosLoader.cargar(CuentaRepository.get(), csv);
@@ -99,6 +100,8 @@ public class MainServer {
 
     // Punto de control local de la replica (creado en cargarPuntoControl).
     private static PuntoControl puntoControl;
+    // Ruta del CSV, para recargar la base si el lider ordena RESET.
+    private static Path csvPath;
 
     /**
      * Carga el punto de control local de la replica (solo replica). El profesor
@@ -157,6 +160,18 @@ public class MainServer {
             String liderHost = System.getenv("BANCO_LIDER_HOST");
             CuentaRepository repo = CuentaRepository.get();
             ClienteReplicacion cliente = new ClienteReplicacion(repo, liderHost, puertoRepl);
+            // Si el lider ordena RESET (caida total: nuestro checkpoint quedo
+            // adelante de su estado durable recuperado de GCS), recargamos la base
+            // del CSV y dejamos la secuencia en 0 para reanudar con RESUME 0.
+            cliente.setAlResetear(() -> {
+                try {
+                    AlumnosLoader.cargar(repo, csvPath);
+                } catch (Exception e) {
+                    System.err.println("Reset: no se pudo recargar el CSV: " + e.getMessage());
+                }
+                repo.restaurarSecuencia(0);
+                System.out.println("Reset del lider: base recargada del CSV, reanudando desde 0.");
+            });
             if (puntoControl != null) {
                 cliente.setPuntoControl(puntoControl);
                 puntoControl.iniciar(repo);

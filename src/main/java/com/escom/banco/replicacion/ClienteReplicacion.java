@@ -25,6 +25,9 @@ public class ClienteReplicacion {
     // Opcional: lo usa la replica de produccion para persistir su avance en disco
     // y aplicar de forma consistente con los snapshots. null = comportamiento base.
     private volatile PuntoControl puntoControl;
+    // Opcional: que hacer si el lider ordena RESET (recargar la base del CSV y
+    // dejar la secuencia en 0). null = solo se ignora el RESET.
+    private volatile Runnable alResetear;
 
     public ClienteReplicacion(CuentaRepository repo, String hostLider, int puerto) {
         this.repo = repo;
@@ -33,6 +36,7 @@ public class ClienteReplicacion {
     }
 
     public void setPuntoControl(PuntoControl pc) { this.puntoControl = pc; }
+    public void setAlResetear(Runnable r) { this.alResetear = r; }
 
     public void iniciar() {
         activo = true;
@@ -64,6 +68,15 @@ public class ClienteReplicacion {
                 PuntoControl pc = this.puntoControl;
                 String linea;
                 while (activo && (linea = in.readLine()) != null) {
+                    if (linea.equals("RESET")) {
+                        // El lider indica que nuestro checkpoint quedo ADELANTE de su
+                        // estado durable (caida total: se recupero del log GCS
+                        // rezagado). Reconstruir la base y reanudar desde 0 para no
+                        // quedar divergente.
+                        Runnable r = alResetear;
+                        if (r != null) r.run();
+                        break;
+                    }
                     try {
                         Transaccion tx = CodecTransaccion.deLinea(linea);
                         if (pc != null) pc.aplicar(repo, tx);
