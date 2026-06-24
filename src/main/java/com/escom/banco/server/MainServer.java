@@ -3,6 +3,7 @@ package com.escom.banco.server;
 import com.escom.banco.data.AlumnosLoader;
 import com.escom.banco.data.CuentaRepository;
 import com.escom.banco.replicacion.ClienteReplicacion;
+import com.escom.banco.replicacion.PuntoControl;
 import com.escom.banco.replicacion.ServidorReplicacion;
 import com.escom.banco.server.nio.ServidorNio;
 
@@ -23,6 +24,7 @@ public class MainServer {
         }
 
         Path csv = Path.of(System.getenv().getOrDefault("ALUMNOS_CSV", "alumnos.csv"));
+        csvPath = csv;
         System.out.println("Cargando cuentas desde " + csv.toAbsolutePath() + " ...");
         long t0 = System.nanoTime();
         int n = AlumnosLoader.cargar(CuentaRepository.get(), csv);
@@ -34,8 +36,11 @@ public class MainServer {
 
         // El lider recupera el estado desde el log GCS ANTES de servir trafico y
         // de enganchar el observador (asi el replay no se reescribe en GCS).
+        // La replica carga su punto de control local (si existe) tambien ANTES de
+        // servir, para no mostrar saldos del CSV en /stats durante el arranque.
         boolean esLider = esLider();
         if (esLider) iniciarAlmacenGcs();
+        else cargarPuntoControl();
 
         ServidorNio server = BancoHttp.crear(puerto, idLocal, peers);
         server.iniciar();
@@ -93,6 +98,35 @@ public class MainServer {
         System.out.println("Log durable en GCS: bucket " + bucket);
     }
 
+    // Punto de control local de la replica (creado en cargarPuntoControl).
+    private static PuntoControl puntoControl;
+    // Ruta del CSV, para recargar la base si el lider ordena RESET.
+    private static Path csvPath;
+
+    /**
+     * Carga el punto de control local de la replica (solo replica). El profesor
+     * mata el PROCESO del nodo (no destruye la instancia), asi que el disco
+     * sobrevive: al revivir se restaura {secuencia + saldos} y el cliente pedira
+     * RESUME desde esa secuencia en vez de borrar y descargar todo. Ruta por
+     * BANCO_CHECKPOINT (debe persistir entre reinicios del proceso); periodo del
+     * snapshot por BANCO_CHECKPOINT_SEG. Si no hay archivo o esta corrupto, se
+     * arranca desde el CSV sin impedir el boot.
+     */
+    private static void cargarPuntoControl() {
+        Path ruta = Path.of(System.getenv().getOrDefault("BANCO_CHECKPOINT", "checkpoint.bin"));
+        long seg = 3;
+        try { seg = Long.parseLong(System.getenv().getOrDefault("BANCO_CHECKPOINT_SEG", "3")); }
+        catch (NumberFormatException ignored) {}
+        puntoControl = new PuntoControl(ruta, seg);
+        long seq = puntoControl.cargar(CuentaRepository.get());
+        if (seq >= 0) {
+            System.out.printf("Punto de control cargado: secuencia %d (saldos restaurados de %s).%n",
+                    seq, ruta.toAbsolutePath());
+        } else {
+            System.out.println("Sin punto de control previo: la replica arranca desde el CSV.");
+        }
+    }
+
     /** Peers del panel (host:port HTTP de los otros nodos) desde BANCO_PEERS. */
     private static java.util.List<String> leerPeers() {
         String env = System.getenv("BANCO_PEERS");
@@ -124,7 +158,28 @@ public class MainServer {
             System.out.println("Rol: LIDER - replicacion TCP en puerto " + puertoRepl);
         } else {
             String liderHost = System.getenv("BANCO_LIDER_HOST");
-            new ClienteReplicacion(CuentaRepository.get(), liderHost, puertoRepl).iniciar();
+            CuentaRepository repo = CuentaRepository.get();
+            ClienteReplicacion cliente = new ClienteReplicacion(repo, liderHost, puertoRepl);
+            // Si el lider ordena RESET (caida total: nuestro checkpoint quedo
+            // adelante de su estado durable recuperado de GCS), recargamos la base
+            // del CSV y dejamos la secuencia en 0 para reanudar con RESUME 0.
+            cliente.setAlResetear(() -> {
+                try {
+                    AlumnosLoader.cargar(repo, csvPath);
+                } catch (Exception e) {
+                    System.err.println("Reset: no se pudo recargar el CSV: " + e.getMessage());
+                }
+                repo.restaurarSecuencia(0);
+                System.out.println("Reset del lider: base recargada del CSV, reanudando desde 0.");
+            });
+            if (puntoControl != null) {
+                cliente.setPuntoControl(puntoControl);
+                puntoControl.iniciar(repo);
+                // Snapshot exacto en un apagado ordenado (SIGTERM): "detiene el proceso".
+                Runtime.getRuntime().addShutdownHook(
+                        new Thread(() -> puntoControl.guardarFinal(repo), "punto-control-final"));
+            }
+            cliente.iniciar();
             System.out.println("Rol: REPLICA - siguiendo a " + liderHost + ":" + puertoRepl);
         }
     }

@@ -16,6 +16,8 @@ public final class TestRunner {
         ReplicacionTcpTest.run();
         System.out.println("== ReplicacionMultiWriterTest ==");
         ReplicacionMultiWriterTest.run();
+        System.out.println("== PuntoControlTest ==");
+        PuntoControlTest.run();
         System.out.println("== GeneradorCargaTest ==");
         GeneradorCargaTest.run();
         System.out.println("== PanelTest ==");
