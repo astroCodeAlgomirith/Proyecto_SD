@@ -3,6 +3,7 @@ package com.escom.banco.data;
 import com.escom.banco.model.Cuenta;
 import com.escom.banco.model.Transaccion;
 
+import java.util.Collection;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
@@ -48,6 +49,8 @@ public class CuentaRepository {
     public void put(Cuenta c) { cuentas.put(c.id, c); }
     public Cuenta get(int id) { return cuentas.get(id); }
     public int tamano() { return cuentas.size(); }
+    /** Vista de todas las cuentas (para el snapshot del punto de control). */
+    public Collection<Cuenta> cuentas() { return cuentas.values(); }
 
     public long totalTransferencias() { return totalTransferencias.sum(); }
     public long ultimaTxId() { return ultimaTxId; }
@@ -108,6 +111,20 @@ public class CuentaRepository {
             segundo.lock.unlock();
             primero.lock.unlock();
         }
+    }
+
+    /**
+     * Restaura los contadores tras cargar un punto de control de la replica:
+     * fija la secuencia, la ultima tx y el total de transferencias. El total
+     * == seq porque cada transferencia exitosa incrementa ambos 1:1 y sin
+     * huecos. Solo se usa al arrancar una replica, ANTES de iniciar el cliente
+     * de replicacion (que pedira RESUME desde esta secuencia).
+     */
+    public void restaurarSecuencia(long seq) {
+        secuencia.set(seq);
+        ultimaTxId = seq;
+        totalTransferencias.reset();
+        totalTransferencias.add(seq);
     }
 
     /**
