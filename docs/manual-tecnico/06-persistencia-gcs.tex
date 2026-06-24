@@ -10,6 +10,18 @@ hace el dialogo real con la API de GCS usando solo el JDK. La activacion ocurre
 en \codigo{server/MainServer.java}, que solo arranca el log en el lider y solo
 si esta definida la variable de entorno \codigo{BANCO\_GCS\_BUCKET}.
 
+\begin{nota}
+El sistema tiene dos recuperaciones con alcances distintos. El log de Cloud
+Storage descrito en este capitulo cubre la \emph{caida total} de los tres nodos:
+cuando se pierde el estado en memoria de todos, el lider reconstruye el estado
+completo reaplicando el log desde GCS. El \emph{punto de control local} de cada
+replica (\codigo{replicacion/PuntoControl.java}, configurado con
+\codigo{BANCO\_CHECKPOINT}; detallado en el capitulo de replicacion) cubre el
+caso opuesto: una replica que se reinicia mientras el lider sigue vivo reanuda
+desde su ultima secuencia sin redescargar todo. Mecanismos complementarios, no
+sustitutos.
+\end{nota}
+
 \subsection{Escritura asincrona que no bloquea la transferencia}
 
 La regla de diseno es que el camino critico de una transferencia nunca debe
@@ -138,9 +150,10 @@ public long recuperar(Consumer<Transaccion> aplicar) {
     try {
         txs = new ArrayList<>(subidor.leerTodas());
     } catch (Exception e) {
-        // No degradamos a estado base en silencio: servir el CSV con seq=0
-        // haria que las nuevas tx reutilicen seqs ya usados y corrompan el
-        // log. Fallamos ruidosamente para abortar el arranque.
+        // No degradamos a estado base en silencio: servir el CSV con
+        // secuencia=0 haria que las nuevas tx reutilicen seqs ya usados y
+        // corrompan el log durable. Fallamos ruidosamente para que el
+        // arranque aborte y el nodo no sirva un estado falso.
         throw new IllegalStateException(
                 "GCS: no se pudo leer el log para recuperar; se aborta el "
                 + "arranque para no servir estado base corrupto", e);
@@ -166,7 +179,9 @@ long recuperadas = almacen.recuperar(repo::aplicarReplica);
 almacen.iniciar(recuperadas);
 repo.setObservador(almacen::registrar);
 repo.setConteoStorage(almacen::escritos);
-// Drena la cola asincrona en un apagado ordenado (SIGTERM).
+// Drena la cola asincrona en un apagado ordenado (SIGTERM): una tx ya
+// ackeada (HTTP 200) puede seguir pendiente de subir a GCS y se perderia
+// del log durable si el JVM termina sin vaciar la cola.
 Runtime.getRuntime().addShutdownHook(new Thread(() -> almacen.detener()));
 \end{lstlisting}
 

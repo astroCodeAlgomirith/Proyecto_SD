@@ -63,7 +63,7 @@ java -cp "target/banco.jar:target/test-classes" pruebas.TestRunner
 \end{lstlisting}
 
 \begin{nota}
-En total las diez suites suman \textbf{92 aserciones} verdes. El conteo final lo
+En total las once suites suman \textbf{110 aserciones} verdes. El conteo final lo
 imprime el propio \codigo{TestRunner} y, mientras todas pasen, el script termina
 con codigo de salida 0.
 \end{nota}
@@ -109,6 +109,24 @@ no solo la suma global conservada en ambos repos, sino la igualdad de saldo
 \emph{por cuenta} lider == replica para todas las cuentas; sin la serializacion
 del par seq+log bajo \codigo{seqLock} el lector se saltaria una secuencia aun no
 insertada y la replica divergiria.
+
+\item \codigo{pruebas/PuntoControlTest.java} (18 aserciones): valida el punto de
+control en disco de la replica con seis casos. En \codigo{roundTrip()} guarda con
+\codigo{guardarFinal} y comprueba que \codigo{cargar} restaura saldos, secuencia y
+\codigo{totalTransferencias} (igual a la secuencia). \codigo{sinArchivo()}
+confirma que \codigo{cargar} devuelve \codigo{-1} y deja la secuencia en 0 (arranque
+desde el CSV) cuando no hay archivo, y \codigo{archivoCorrupto()} que devuelve \codigo{-1}
+cuando los bytes son basura. \codigo{archivoTruncado()} corta un checkpoint valido por la mitad (cabecera
+buena, cuerpo a medias) y exige \codigo{-1} con saldos y secuencia sin tocar: \codigo{cargar}
+parsea todo antes de mutar, de modo que un truncado nunca deja un estado
+mitad-CSV/mitad-checkpoint. \codigo{resumeE2E()} ejercita la reanudacion completa con
+sockets reales: la replica alcanza al lider, persiste su punto de corte, se reinicia
+desde su secuencia exacta y pide solo \codigo{X+1..} al lider, terminando con saldos
+iguales al lider y \codigo{totalTransferencias} igual a la secuencia final (sin doble
+aplicacion). \codigo{resetSiAdelantada()} simula una replica que viene de un checkpoint
+mas nuevo que el estado del lider rezagado: el lider ordena \codigo{RESET}, el callback
+\codigo{alResetear} recarga la base y la replica converge al lider en vez de quedar
+divergente.
 
 \item \codigo{pruebas/GeneradorCargaTest.java} (5 aserciones): corre el
 \codigo{GeneradorCarga} unos 2 segundos contra un nodo HTTP real en proceso

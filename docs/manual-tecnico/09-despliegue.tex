@@ -117,6 +117,8 @@ BANCO\_PEERS          & Peers del panel del lider (host:port); \codigo{MainServe
 BANCO\_LIDER\_HOST    & Host del lider que siguen las replicas; \codigo{MainServer.java}. \\
 BANCO\_GCS\_BUCKET    & Bucket del log durable, solo lider; \codigo{MainServer.java}. \\
 BANCO\_REACTORES      & Numero de hilos de I/O del servidor; \codigo{BancoHttp.java}. \\
+BANCO\_CHECKPOINT      & Ruta del punto de control local de la replica (def \codigo{checkpoint.bin}; en prod \codigo{/opt/banco/checkpoint.bin}); \codigo{MainServer.java}. \\
+BANCO\_CHECKPOINT\_SEG & Periodo en segundos del snapshot de la replica (def 3); \codigo{MainServer.java}. \\
 \end{tablaglab}
 
 El reparto del rol no se declara: lo decide la ausencia o presencia de
@@ -134,7 +136,10 @@ if (esLider()) {
     new ServidorReplicacion(CuentaRepository.get(), puertoRepl).iniciar();
 } else {
     String liderHost = System.getenv("BANCO_LIDER_HOST");
-    new ClienteReplicacion(CuentaRepository.get(), liderHost, puertoRepl).iniciar();
+    CuentaRepository repo = CuentaRepository.get();
+    ClienteReplicacion cliente = new ClienteReplicacion(repo, liderHost, puertoRepl);
+    // ...
+    cliente.iniciar();
 }
 \end{lstlisting}
 
@@ -158,6 +163,7 @@ ALUMNOS_CSV=/opt/banco/alumnos.csv
 BANCO_JWT_SECRET=<secreto-compartido>
 BANCO_NODO_ID=nodo-2
 BANCO_LIDER_HOST=34.136.17.97
+BANCO_CHECKPOINT=/opt/banco/checkpoint.bin
 \end{lstlisting}
 
 \begin{advertencia}
@@ -165,4 +171,27 @@ BANCO_LIDER_HOST=34.136.17.97
 blindado: \codigo{iniciarAlmacenGcs()} se invoca unicamente cuando
 \codigo{esLider()} es verdadero, asi que una replica (que tiene
 \codigo{BANCO\_LIDER\_HOST}) ignora esa variable y nunca activa el log durable.
+\end{advertencia}
+
+\subsection{Operacion del punto de control en las replicas}
+
+El \emph{startup-script} de \codigo{nodo-2} y \codigo{nodo-3} difiere del generico
+en dos detalles propios de la replica: define \codigo{BANCO\_CHECKPOINT} (ruta
+absoluta y persistente del punto de control) en el \codigo{EnvironmentFile} y, antes
+de levantar el servicio, borra cualquier checkpoint heredado para garantizar un
+\emph{bring-up} limpio. Sin ese borrado, una VM recreada sobre el mismo disco podria
+arrancar con un checkpoint viejo en lugar de partir del CSV.
+
+\begin{lstlisting}[language=none,caption={Variante del startup-script de una replica (bring-up limpio).}]
+rm -f /opt/banco/checkpoint.bin   # estado fresco en cada arranque de la VM
+echo "BANCO_CHECKPOINT=/opt/banco/checkpoint.bin" >> /etc/banco.env
+systemctl enable --now banco.service
+\end{lstlisting}
+
+\begin{advertencia}
+Para bajar una replica en la demo usa \codigo{systemctl stop banco}: \codigo{systemd}
+envia \codigo{SIGTERM}, el \emph{shutdown hook} escribe el checkpoint exacto y al
+hacer \codigo{systemctl start banco} la replica reanuda por secuencia. NO uses
+\codigo{kill}: por \codigo{Restart=always} el proceso revive de inmediato y la
+replica nunca permanece caida para demostrar la recuperacion.
 \end{advertencia}
