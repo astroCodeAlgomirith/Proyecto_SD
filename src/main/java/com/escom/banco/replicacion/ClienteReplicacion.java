@@ -58,8 +58,8 @@ public class ClienteReplicacion {
                          new OutputStreamWriter(s.getOutputStream(), StandardCharsets.UTF_8))) {
 
                 long seq = repo.secuenciaActual();
-                // El profesor pide ver este renglon en el log de la replica al
-                // levantarla: confirma que reanuda por secuencia (no borra+descarga).
+                // Deja constancia en el log de la replica al levantarla: confirma
+                // que reanuda por secuencia (no borra y descarga todo de nuevo).
                 System.out.println("Me quede en la secuencia " + seq
                         + ", enviame desde " + (seq + 1));
                 out.write("RESUME " + seq + "\n");

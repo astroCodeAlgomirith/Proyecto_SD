@@ -12,7 +12,7 @@ import java.util.function.Consumer;
 import java.util.function.LongSupplier;
 
 /**
- * Almacen en memoria de las cuentas (sin SGBD, como exige el PDF).
+ * Almacen en memoria de las cuentas, sin motor de base de datos.
  * Las transferencias toman el lock de las dos cuentas en orden de id para
  * evitar deadlock, y la suma total se conserva exacta (centavos long).
  */

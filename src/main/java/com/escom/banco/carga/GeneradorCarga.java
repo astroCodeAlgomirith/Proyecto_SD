@@ -13,9 +13,9 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
- * Generador de carga del PDF: golpea al nodo lider 1 minuto con 80% lecturas /
- * 20% transferencias concurrentes y verifica que la suma total de saldos no
- * cambie (invariante de conservacion). Java puro, sin dependencias nuevas.
+ * Generador de carga: golpea al nodo lider con 80% lecturas / 20% transferencias
+ * concurrentes y verifica que la suma total de saldos no cambie (invariante de
+ * conservacion). Java puro, sin dependencias nuevas.
  *
  * Motor asincrono: en vez de un hilo por peticion (1 envio bloqueante a la vez),
  * mantiene una ventana de N peticiones EN VUELO con sendAsync + un semaforo. Asi

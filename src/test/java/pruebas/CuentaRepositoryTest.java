@@ -66,7 +66,7 @@ public final class CuentaRepositoryTest {
 
     // saldoTotalCentavos() debe RECALCULAR desde los saldos reales para poder
     // detectar un descuadre; un contador incremental se "conserva" solo y vuelve
-    // tautologica la verificacion del invariante que pide el PDF.
+    // tautologica la verificacion del invariante.
     private static void detectaDescuadre() {
         CuentaRepository repo = new CuentaRepository();
         repo.put(new Cuenta(1, "A", "A", "A", 50000));

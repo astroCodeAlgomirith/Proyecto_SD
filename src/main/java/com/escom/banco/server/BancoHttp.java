@@ -38,7 +38,7 @@ public final class BancoHttp {
         return crear(puerto, "este-nodo", List.of());
     }
 
-    /** Crea (sin arrancar) el servidor con los 4 endpoints del PDF + /stats + panel. */
+    /** Crea (sin arrancar) el servidor con los 4 endpoints REST + /stats + panel. */
     public static ServidorNio crear(int puerto, String idLocal, List<String> peers) {
         AuthHandler auth = new AuthHandler();
         Ruteador r = new Ruteador()

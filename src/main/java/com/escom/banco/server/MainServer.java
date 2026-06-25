@@ -10,7 +10,7 @@ import com.escom.banco.server.nio.ServidorNio;
 import java.nio.file.Path;
 
 /**
- * Nodo del mini banco (Fase 0: un solo nodo, los 4 endpoints del PDF).
+ * Nodo del mini banco (lider o replica): 4 endpoints REST + /stats + panel.
  * Uso: java -jar banco.jar [puerto]   (por defecto 8080)
  * CSV: variable de entorno ALUMNOS_CSV (por defecto ./alumnos.csv)
  */
@@ -67,7 +67,7 @@ public class MainServer {
      * Primero reaplica el log existente sobre el estado del CSV (recuperacion en
      * frio si fallaron todos los nodos) y luego engancha el observador para los
      * nuevos commits. Nota: las cuentas creadas via /api/register que no esten
-     * en el CSV no se recuperan; la prueba del PDF usa las cuentas del dataset.
+     * en el CSV no se recuperan; las pruebas operan sobre las cuentas del dataset.
      */
     private static void iniciarAlmacenGcs() {
         String bucket = System.getenv("BANCO_GCS_BUCKET");
@@ -104,8 +104,8 @@ public class MainServer {
     private static Path csvPath;
 
     /**
-     * Carga el punto de control local de la replica (solo replica). El profesor
-     * mata el PROCESO del nodo (no destruye la instancia), asi que el disco
+     * Carga el punto de control local de la replica (solo replica). Si se mata el
+     * PROCESO del nodo (sin destruir la instancia ni su disco), el disco
      * sobrevive: al revivir se restaura {secuencia + saldos} y el cliente pedira
      * RESUME desde esa secuencia en vez de borrar y descargar todo. Ruta por
      * BANCO_CHECKPOINT (debe persistir entre reinicios del proceso); periodo del

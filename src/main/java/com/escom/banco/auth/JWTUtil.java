@@ -6,7 +6,7 @@ import com.auth0.jwt.interfaces.DecodedJWT;
 import com.auth0.jwt.exceptions.JWTVerificationException;
 
 /**
- * JWT HMAC256 (reutilizado de la practica 38).
+ * Emision y verificacion de JWT con HMAC256.
  * El SECRET debe ser EL MISMO en los 3 nodos para que un token emitido por el
  * lider valide en las replicas -> se toma de la variable de entorno.
  */

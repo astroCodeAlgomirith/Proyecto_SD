@@ -4,7 +4,7 @@ import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
-/** gson centralizado (reemplaza el parser casero de la practica 38). */
+/** Utilidades JSON centralizadas sobre gson. */
 public final class Json {
     public static final Gson GSON = new Gson();
 
