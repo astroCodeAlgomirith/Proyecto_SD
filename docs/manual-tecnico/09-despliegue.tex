@@ -100,6 +100,37 @@ se ejecuta de nuevo en el arranque y trae el artefacto actualizado antes de
 levantar \codigo{banco.service}.
 \end{nota}
 
+\subsection{Encender y operar el cluster}
+
+Como las tres VMs ya existen con su \emph{startup-script} en la metadata y la IP
+del lider esta reservada, poner en marcha el cluster no requiere recrear nada:
+basta con \textbf{encender} las instancias. En cada arranque el startup-script
+vuelve a traer los artefactos del bucket y \codigo{systemd} levanta
+\codigo{banco.service}, de modo que el nodo queda sirviendo sin intervencion.
+
+\begin{lstlisting}[language=none,caption={Encender el cluster (el lider primero).}]
+gcloud compute instances start nodo-1 nodo-2 nodo-3 \
+  --zone=us-central1-c --project=sd-final-eddndev
+\end{lstlisting}
+
+Conviene arrancar \codigo{nodo-1} (lider) primero para que las replicas lo
+encuentren al conectarse; de todos modos \codigo{ClienteReplicacion} reintenta en
+bucle, asi que el orden no es critico. Terminada la prueba, las instancias se
+apagan para no facturar (la IP estatica reservada persiste, asi que el dashboard
+seguira apuntando a la misma direccion al volver a encenderlas):
+
+\begin{lstlisting}[language=none,caption={Apagar el cluster al terminar.}]
+gcloud compute instances stop nodo-1 nodo-2 nodo-3 \
+  --zone=us-central1-c --project=sd-final-eddndev
+\end{lstlisting}
+
+\begin{nota}
+Encender la VM basta porque la creacion (tipo de maquina E2, disco, regla de
+firewall, IP reservada y \emph{startup-script} en metadata) ya quedo hecha una
+sola vez. Si en algun momento las instancias se eliminaron para ahorrar costo,
+habria que volver a crearlas con esos mismos parametros antes de poder encenderlas.
+\end{nota}
+
 \subsection{Configuracion por variables de entorno}
 
 Las tres VMs comparten el mismo jar; lo que las diferencia es el conjunto de
