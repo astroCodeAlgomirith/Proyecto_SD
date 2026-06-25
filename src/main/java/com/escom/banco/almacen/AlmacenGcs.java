@@ -14,21 +14,38 @@ import java.util.function.Consumer;
 /**
  * Log durable de transacciones en Cloud Storage. Escribe en segundo plano (una
  * cola + un hilo) para no bloquear la ruta de la transferencia: el lider sigue
- * siendo la fuente de verdad y el objeto en GCS va detras. La subida real se
- * delega en Subidor (asi se puede probar sin tocar la red).
+ * siendo la fuente de verdad y el objeto en GCS va detras. El writer AGRUPA las
+ * tx encoladas en un solo objeto por PUT (drainTo hasta MAX_LOTE): el costo de
+ * subir a GCS lo domina el round-trip, no los bytes, asi que un lote de ~1000 tx
+ * cuesta casi lo mismo que una sola y baja el costo por tx ~1000x; por eso el log
+ * no se rezaga bajo carga, sin tocar el hot-path. La subida real se delega en
+ * Subidor (asi se puede probar sin tocar la red).
  */
 public final class AlmacenGcs {
 
-    /** Subida de una transaccion a GCS; devuelve true si quedo persistida. */
+    /** Subida de transacciones a GCS; devuelve true si quedaron persistidas. */
     public interface Subidor {
         boolean subir(Transaccion t) throws Exception;
-        /** Cuantos objetos ya existen en el bucket (para sembrar el contador). */
+        /**
+         * Sube un lote como UN solo objeto, amortizando el round-trip HTTP sobre
+         * muchas tx. Por defecto cae a una-por-una, para subidores simples (p. ej.
+         * los de prueba) que no necesitan agrupar.
+         */
+        default boolean subirLote(List<Transaccion> lote) throws Exception {
+            for (Transaccion t : lote) if (!subir(t)) return false;
+            return true;
+        }
+        /** Cuantas tx ya existen en el log (para sembrar el contador). */
         default long contarExistentes() { return 0; }
         /** Todas las tx del log (para recuperar el estado en un arranque en frio). */
         default List<Transaccion> leerTodas() throws Exception { return List.of(); }
     }
 
     private static final int REINTENTOS = 3;
+    // Tope de tx por objeto en GCS. La espera de poll() abajo actua de flush: una
+    // tx sola se sube en <=200ms (no espera a llenar el lote); bajo carga, drainTo
+    // junta hasta MAX_LOTE en un PUT.
+    private static final int MAX_LOTE = 1000;
 
     private final Subidor subidor;
     private final BlockingQueue<Transaccion> cola = new LinkedBlockingQueue<>();
@@ -97,18 +114,24 @@ public final class AlmacenGcs {
                 continue;
             }
             if (t == null) continue;
-            if (subirConReintentos(t)) {
-                escritos.incrementAndGet();
+            // Junta la primera tx con todo lo que ya este encolado (hasta MAX_LOTE)
+            // y lo sube como un solo objeto. drainTo respeta el orden FIFO = seq.
+            List<Transaccion> lote = new ArrayList<>();
+            lote.add(t);
+            cola.drainTo(lote, MAX_LOTE - 1);
+            if (subirLoteConReintentos(lote)) {
+                escritos.addAndGet(lote.size());
             } else {
-                System.err.println("GCS: no se pudo persistir la tx seq=" + t.seq());
+                System.err.println("GCS: no se pudo persistir el lote seq="
+                        + lote.get(0).seq() + ".." + lote.get(lote.size() - 1).seq());
             }
         }
     }
 
-    private boolean subirConReintentos(Transaccion t) {
+    private boolean subirLoteConReintentos(List<Transaccion> lote) {
         for (int i = 0; i < REINTENTOS; i++) {
             try {
-                if (subidor.subir(t)) return true;
+                if (subidor.subirLote(lote)) return true;
             } catch (Exception e) {
                 // reintentamos con un respiro
             }

@@ -20,7 +20,44 @@ public final class AlmacenGcsTest {
         reintentaTrasFallos();
         siembraConteoExistente();
         seEnganchaAlCommit();
+        agrupaEnLotes();
         recuperaReaplicandoElLog();
+    }
+
+    /** Subidor que recuerda el tamano de cada lote y los seq subidos, en orden. */
+    private static final class SubidorLotes implements AlmacenGcs.Subidor {
+        final List<Integer> tamanos =
+                java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+        final List<Long> seqs =
+                java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+        @Override public boolean subir(Transaccion t) { return subirLote(List.of(t)); }
+        @Override public boolean subirLote(List<Transaccion> lote) {
+            tamanos.add(lote.size());
+            for (Transaccion t : lote) seqs.add(t.seq());
+            // Modela el round-trip lento de GCS: deja que la cola se acumule y el
+            // writer agrupe, en vez de subir una por una.
+            try { Thread.sleep(2); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            return true;
+        }
+    }
+
+    private static void agrupaEnLotes() throws Exception {
+        SubidorLotes s = new SubidorLotes();
+        AlmacenGcs almacen = new AlmacenGcs(s);
+        almacen.iniciar();
+        int n = 1000;
+        for (long seq = 1; seq <= n; seq++) almacen.registrar(new Transaccion(seq, 1, 2, 100));
+        boolean ok = esperar(() -> almacen.escritos() == n, 5000);
+        MiniTest.check(ok, "persiste las " + n + " tx encoladas en rafaga");
+        MiniTest.eq((long) n, (long) s.seqs.size(), "todas las tx llegan al subidor (sin perdidas)");
+        MiniTest.check(s.tamanos.size() < n, "agrupa en lotes: " + s.tamanos.size()
+                + " objetos para " + n + " tx (amortiza el round-trip)");
+        boolean enOrden = true;
+        for (int i = 0; i < s.seqs.size(); i++) {
+            if (s.seqs.get(i) != (long) (i + 1)) { enOrden = false; break; }
+        }
+        MiniTest.check(enOrden, "el lote preserva el orden de seq (1..n)");
+        almacen.detener();
     }
 
     /** Un subidor que recuerda lo subido y puede fallar las primeras N veces. */
