@@ -113,8 +113,8 @@ replica (ver la subseccion del punto de control).
 \subsection{La replica: aplicar y reconectar}
 
 El lado replica es \codigo{com/escom/banco/replicacion/ClienteReplicacion.java}.
-Corre en su propio hilo daemon: se conecta al lider, imprime en su log el renglon
-que el profesor pide ver al levantarla, envia \codigo{RESUME} con
+Corre en su propio hilo daemon: se conecta al lider, deja en su log el renglon
+de reanudacion al levantarla, envia \codigo{RESUME} con
 \codigo{repo.secuenciaActual()} y luego lee linea por linea. Cada transaccion se
 aplica con \codigo{repo.aplicarReplica(...)} (o via \codigo{puntoControl.aplicar},
 si la replica de produccion tiene checkpoint). Si la conexion se cae, el bucle
@@ -123,8 +123,8 @@ replica.
 
 \begin{lstlisting}[language=Java,caption={ClienteReplicacion: log de reanudacion, RESUME, RESET y aplicar en vivo}]
 long seq = repo.secuenciaActual();
-// El profesor pide ver este renglon en el log de la replica al
-// levantarla: confirma que reanuda por secuencia (no borra+descarga).
+// Deja constancia en el log de la replica al levantarla: confirma
+// que reanuda por secuencia (no borra y descarga todo de nuevo).
 System.out.println("Me quede en la secuencia " + seq
         + ", enviame desde " + (seq + 1));
 out.write("RESUME " + seq + "\n");
