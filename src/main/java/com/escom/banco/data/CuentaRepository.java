@@ -7,6 +7,7 @@ import java.util.Collection;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.concurrent.locks.StampedLock;
 import java.util.function.Consumer;
 import java.util.function.LongSupplier;
 
@@ -37,6 +38,15 @@ public class CuentaRepository {
     private final java.util.concurrent.locks.ReentrantLock seqLock =
             new java.util.concurrent.locks.ReentrantLock();
 
+    // Snapshot global: cada movimiento (transferir / aplicarReplica) toma el lock
+    // COMPARTIDO mientras hace debito+credito; saldoTotalCentavos() toma el lock
+    // EXCLUSIVO mientras recorre las cuentas. Asi el agregado nunca observa un
+    // estado a medias (debitado sin acreditar) y los 3 nodos cuadran al centavo
+    // aun bajo carga. Sigue siendo suma real (detecta descuadres), no un contador.
+    // Los movimientos corren concurrentes entre si (lock compartido); solo el
+    // escaneo, raro (cada ~2s en /stats), los pausa unos ms para tomar la foto.
+    private final StampedLock snapshotLock = new StampedLock();
+
     // Observador del log durable (lo pone el lider): se le avisa cada commit.
     private volatile Consumer<Transaccion> observador = t -> {};
     // Conteo de tx en el log durable (Cloud Storage); -1 = deshabilitado.
@@ -57,11 +67,22 @@ public class CuentaRepository {
     public long secuenciaActual() { return secuencia.get(); }
     public RegistroTransacciones registro() { return registro; }
 
-    /** Suma de todos los saldos en centavos (para verificar el invariante). */
+    /**
+     * Suma de todos los saldos en centavos (para verificar el invariante). Toma
+     * el lock EXCLUSIVO del snapshot para que ningun movimiento este a medias
+     * (debitado sin acreditar) durante el recorrido: el total es una foto
+     * consistente, no una suma con costuras. Sigue recalculando desde los saldos
+     * reales, asi que detecta un descuadre (no es un contador que se conserva solo).
+     */
     public long saldoTotalCentavos() {
-        long total = 0;
-        for (Cuenta c : cuentas.values()) total += c.getSaldoCentavos();
-        return total;
+        long stamp = snapshotLock.writeLock();
+        try {
+            long total = 0;
+            for (Cuenta c : cuentas.values()) total += c.getSaldoCentavos();
+            return total;
+        } finally {
+            snapshotLock.unlockWrite(stamp);
+        }
     }
 
     public enum Estado { OK, MISMA_CUENTA, MONTO_INVALIDO, NO_ENCONTRADA, SALDO_INSUFICIENTE }
@@ -83,9 +104,13 @@ public class CuentaRepository {
         Cuenta destino = cuentas.get(destinoId);
         if (origen == null || destino == null) return Resultado.de(Estado.NO_ENCONTRADA);
 
-        // Bloqueo en orden de id (menor primero) para no provocar deadlock.
+        // Bloqueo en orden de id (menor primero) para no provocar deadlock. El
+        // lock compartido del snapshot envuelve el par debito+credito (se toma
+        // ANTES de los locks de cuenta y se suelta DESPUES) para que el escaneo
+        // del total nunca caiga en medio del movimiento.
         Cuenta primero = origenId < destinoId ? origen : destino;
         Cuenta segundo = origenId < destinoId ? destino : origen;
+        long stamp = snapshotLock.readLock();
         primero.lock.lock();
         segundo.lock.lock();
         try {
@@ -110,6 +135,7 @@ public class CuentaRepository {
         } finally {
             segundo.lock.unlock();
             primero.lock.unlock();
+            snapshotLock.unlockRead(stamp);
         }
     }
 
@@ -138,6 +164,7 @@ public class CuentaRepository {
 
         Cuenta primero = t.origenId() < t.destinoId() ? origen : destino;
         Cuenta segundo = t.origenId() < t.destinoId() ? destino : origen;
+        long stamp = snapshotLock.readLock();
         primero.lock.lock();
         segundo.lock.lock();
         try {
@@ -150,6 +177,7 @@ public class CuentaRepository {
         } finally {
             segundo.lock.unlock();
             primero.lock.unlock();
+            snapshotLock.unlockRead(stamp);
         }
     }
 }

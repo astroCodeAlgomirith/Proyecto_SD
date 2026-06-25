@@ -50,7 +50,10 @@ transacciones (base de la replicacion y del log en GCS). El conteo de commits
 \codigo{increment()} sin CAS global (\codigo{sum()} solo lo lee \codigo{/stats}),
 quitando uno de los dos puntos de serializacion global por transferencia. El
 campo \codigo{ultimaTxId} es \codigo{volatile} para publicar el ultimo seq sin
-candado adicional.
+candado adicional. Por ultimo, el \codigo{StampedLock snapshotLock} coordina los
+movimientos con el escaneo del total: cada transferencia lo toma en modo
+\emph{compartido} (corren en paralelo entre si) y la suma del total lo toma en
+modo \emph{exclusivo}, para que el agregado nunca se lea a mitad de un movimiento.
 
 \begin{lstlisting}[language=Java,caption={Estado concurrente de CuentaRepository.java}]
 private final ConcurrentHashMap<Integer, Cuenta> cuentas = new ConcurrentHashMap<>();
@@ -62,19 +65,37 @@ private final RegistroTransacciones registro = new RegistroTransacciones();
 
 // Serializa secuencia+registro.agregar+observador: lock mas interno (sin deadlock).
 private final ReentrantLock seqLock = new ReentrantLock();
+
+// Snapshot: los movimientos toman readLock (compartido); el escaneo del total,
+// writeLock (exclusivo). Asi saldoTotalCentavos() es una foto consistente.
+private final StampedLock snapshotLock = new StampedLock();
 \end{lstlisting}
 
 El invariante de correctitud es que la suma de todos los saldos permanece
 constante ante cualquier secuencia de transferencias. El metodo
 \codigo{saldoTotalCentavos()} lo materializa recorriendo las cuentas y sumando
-sus centavos; se usa en pruebas para verificar la conservacion del dinero.
+sus centavos. Para que ese recorrido sea una \emph{foto consistente} y nunca
+observe un movimiento a medias (una cuenta ya debitada y su contraparte aun sin
+acreditar), toma el \codigo{writeLock} exclusivo del \codigo{snapshotLock}: asi
+ningun \codigo{transferir()} (que sostiene el \codigo{readLock} compartido) puede
+estar en su tramo debito+credito durante la suma. Sigue siendo una suma real
+sobre los saldos --no un contador incremental--, de modo que tambien detecta un
+descuadre (corrupcion o replica mal aplicada); es la propiedad que verifica la
+prueba \codigo{detectaDescuadre}. El costo es minimo: el escaneo es raro (cada
+\textasciitilde2\,s en \codigo{/stats}) y solo entonces pausa los movimientos
+unos milisegundos.
 
-\begin{lstlisting}[language=Java,caption={Verificacion del invariante en CuentaRepository.java}]
-/** Suma de todos los saldos en centavos (para verificar el invariante). */
+\begin{lstlisting}[language=Java,caption={Foto consistente del invariante en CuentaRepository.java}]
+/** Suma consistente de todos los saldos (writeLock: ningun movimiento a medias). */
 public long saldoTotalCentavos() {
-    long total = 0;
-    for (Cuenta c : cuentas.values()) total += c.getSaldoCentavos();
-    return total;
+    long stamp = snapshotLock.writeLock();
+    try {
+        long total = 0;
+        for (Cuenta c : cuentas.values()) total += c.getSaldoCentavos();
+        return total;
+    } finally {
+        snapshotLock.unlockWrite(stamp);
+    }
 }
 \end{lstlisting}
 
@@ -93,9 +114,12 @@ perder transacciones en la replicacion en vivo). El bloque \codigo{finally}
 garantiza la liberacion en orden inverso.
 
 \begin{lstlisting}[language=Java,caption={Bloqueo ordenado y commit en CuentaRepository.java}]
-// Bloqueo en orden de id (menor primero) para no provocar deadlock.
+// Bloqueo en orden de id (menor primero) para no provocar deadlock. El readLock
+// del snapshot envuelve el par debito+credito (se toma ANTES de los locks de
+// cuenta y se suelta DESPUES) para que el escaneo del total no caiga en medio.
 Cuenta primero = origenId < destinoId ? origen : destino;
 Cuenta segundo = origenId < destinoId ? destino : origen;
+long stamp = snapshotLock.readLock();
 primero.lock.lock();
 segundo.lock.lock();
 try {
@@ -120,6 +144,7 @@ try {
 } finally {
     segundo.lock.unlock();
     primero.lock.unlock();
+    snapshotLock.unlockRead(stamp);
 }
 \end{lstlisting}
 

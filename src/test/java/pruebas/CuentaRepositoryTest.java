@@ -12,7 +12,56 @@ public final class CuentaRepositoryTest {
         transferenciaBasica();
         casosBorde();
         invarianteBajoConcurrencia();
+        snapshotConsistenteBajoCarga();
         detectaDescuadre();
+    }
+
+    // El total debe ser una FOTO consistente aun bajo carga: mientras 8 hilos
+    // martillean transferencias, un lector muestrea saldoTotalCentavos() y cada
+    // lectura tiene que dar el invariante exacto (sin "costuras" de un movimiento
+    // a medias). Sin el snapshotLock esta prueba veria un total torcido y fallaria.
+    private static void snapshotConsistenteBajoCarga() throws InterruptedException {
+        CuentaRepository repo = new CuentaRepository();
+        int n = 2000;
+        long porCuenta = 100000;
+        for (int i = 1; i <= n; i++) repo.put(new Cuenta(i, "n", "a", "b", porCuenta));
+        final long esperado = (long) n * porCuenta;
+
+        final java.util.concurrent.atomic.AtomicBoolean corriendo =
+                new java.util.concurrent.atomic.AtomicBoolean(true);
+        final java.util.concurrent.atomic.AtomicLong torcido =
+                new java.util.concurrent.atomic.AtomicLong(esperado);
+        final java.util.concurrent.atomic.AtomicLong muestras =
+                new java.util.concurrent.atomic.AtomicLong(0);
+
+        int hilos = 8;
+        Thread[] ws = new Thread[hilos];
+        for (int h = 0; h < hilos; h++) {
+            final long seed = h;
+            ws[h] = new Thread(() -> {
+                java.util.Random r = new java.util.Random(seed);
+                while (corriendo.get()) {
+                    repo.transferir(1 + r.nextInt(n), 1 + r.nextInt(n), 1 + r.nextInt(100));
+                }
+            });
+        }
+        Thread lector = new Thread(() -> {
+            while (corriendo.get()) {
+                long total = repo.saldoTotalCentavos();
+                muestras.incrementAndGet();
+                if (total != esperado) { torcido.set(total); corriendo.set(false); }
+            }
+        });
+
+        for (Thread t : ws) t.start();
+        lector.start();
+        Thread.sleep(400);
+        corriendo.set(false);
+        for (Thread t : ws) t.join();
+        lector.join();
+
+        MiniTest.eq(esperado, torcido.get(),
+                "saldoTotalCentavos es foto consistente bajo carga (" + muestras.get() + " muestras)");
     }
 
     // saldoTotalCentavos() debe RECALCULAR desde los saldos reales para poder
